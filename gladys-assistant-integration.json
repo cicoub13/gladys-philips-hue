@@ -6,8 +6,8 @@
     "en": "Control your Philips Hue lights (on/off, brightness, color and white temperature) from Gladys, over your local network.",
     "fr": "Pilotez vos lampes Philips Hue (marche/arrêt, luminosité, couleur et température de blanc) depuis Gladys, sur votre réseau local."
   },
-  "version": "1.0.1",
-  "docker_image": "ghcr.io/cicoub13/gladys-philips-hue:1.0.1",
+  "version": "1.0.2",
+  "docker_image": "ghcr.io/cicoub13/gladys-philips-hue:1.0.2",
   "gladys_version": ">=4.62.0",
   "cover_image": "https://raw.githubusercontent.com/cicoub13/gladys-philips-hue/master/cover.png",
   "transports": [
