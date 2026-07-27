@@ -1,0 +1,64 @@
+{
+  "manifest_version": 1,
+  "type": "device",
+  "name": "Philips Hue",
+  "description": {
+    "en": "Control your Philips Hue lights (on/off, brightness, color and white temperature) from Gladys, over your local network.",
+    "fr": "Pilotez vos lampes Philips Hue (marche/arrêt, luminosité, couleur et température de blanc) depuis Gladys, sur votre réseau local."
+  },
+  "version": "1.0.0",
+  "docker_image": "ghcr.io/cicoub13/gladys-philips-hue:1.0.0",
+  "gladys_version": ">=4.62.0",
+  "cover_image": "https://raw.githubusercontent.com/cicoub13/gladys-philips-hue/master/cover.png",
+  "transports": ["local"],
+  "config_schema": [
+    {
+      "key": "intro",
+      "type": "section",
+      "label": { "en": "Pairing your Hue bridge", "fr": "Appairer votre bridge Hue" },
+      "description": {
+        "en": "Use the buttons below: first \"Discover bridges\" to find your Hue bridge on the network, then press the physical link button on top of the bridge and click \"Pair bridge\" within 30 seconds. You can also fill the bridge IP manually if auto-discovery fails.",
+        "fr": "Utilisez les boutons ci-dessous : d'abord « Découvrir les bridges » pour trouver votre bridge Hue sur le réseau, puis appuyez sur le bouton physique du bridge et cliquez sur « Appairer le bridge » dans les 30 secondes. Vous pouvez aussi renseigner l'IP du bridge manuellement si la découverte automatique échoue."
+      }
+    },
+    {
+      "key": "bridge_ip",
+      "type": "text",
+      "label": { "en": "Bridge IP address (optional)", "fr": "Adresse IP du bridge (optionnel)" },
+      "description": {
+        "en": "Only needed if automatic discovery does not find your bridge. Example: 192.168.1.42",
+        "fr": "Nécessaire uniquement si la découverte automatique ne trouve pas votre bridge. Exemple : 192.168.1.42"
+      },
+      "required": false,
+      "default": ""
+    },
+    {
+      "key": "poll_frequency",
+      "type": "number",
+      "label": { "en": "Refresh interval (s)", "fr": "Intervalle de rafraîchissement (s)" },
+      "description": {
+        "en": "How often the light states are refreshed from the bridge, in seconds.",
+        "fr": "Fréquence de rafraîchissement de l'état des lampes depuis le bridge, en secondes."
+      },
+      "required": false,
+      "default": 60,
+      "min": 5,
+      "max": 3600
+    }
+  ],
+  "actions": [
+    {
+      "key": "discover_bridges",
+      "label": { "en": "Discover bridges", "fr": "Découvrir les bridges" },
+      "timeout_seconds": 20
+    },
+    {
+      "key": "pair_bridge",
+      "label": {
+        "en": "Pair bridge (press the link button first)",
+        "fr": "Appairer le bridge (appuyez d'abord sur le bouton)"
+      },
+      "timeout_seconds": 20
+    }
+  ]
+}
