@@ -3,8 +3,8 @@
   "type": "device",
   "name": "Philips Hue",
   "description": {
-    "en": "Control your Philips Hue lights (on/off, brightness, color and white temperature) from Gladys, over your local network.",
-    "fr": "Pilotez vos lampes Philips Hue (marche/arrêt, luminosité, couleur et température de blanc) depuis Gladys, sur votre réseau local."
+    "en": "Control Philips Hue lights (on/off, brightness, color, white temperature) from Gladys, locally.",
+    "fr": "Pilotez vos lampes Philips Hue (marche/arrêt, luminosité, couleur, température de blanc) en local."
   },
   "version": "1.0.2",
   "docker_image": "ghcr.io/cicoub13/gladys-philips-hue:1.0.2",
@@ -28,7 +28,7 @@
     },
     {
       "key": "bridge_ip",
-      "type": "text",
+      "type": "string",
       "label": {
         "en": "Bridge IP address (optional)",
         "fr": "Adresse IP du bridge (optionnel)"
