@@ -1,0 +1,83 @@
+# -----------------------------------------------------------------------------
+# Cut a new release — entirely from the GitHub UI, no local tooling needed.
+#
+# In GitHub: Actions -> Release -> "Run workflow" -> pick patch / minor / major.
+#
+# What it does, in one run:
+#   1. computes the next semver from `package.json` (npm version rules);
+#   2. writes it into `package.json`, `package-lock.json` AND the manifest
+#      (`gladys-assistant-integration.json`: both `version` and the
+#      `docker_image` tag, so the indexer and the image stay in lockstep);
+#   3. commits the bump and pushes the `vX.Y.Z` tag;
+#   4. calls build.yml to publish the multi-arch image (`:X.Y.Z` + `:latest`).
+# -----------------------------------------------------------------------------
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-type:
+        description: 'Version bump for this release'
+        required: true
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Bump version and update the manifest
+        id: bump
+        env:
+          RELEASE_TYPE: ${{ inputs.release-type }}
+        run: |
+          set -euo pipefail
+          new_version="$(npm version "$RELEASE_TYPE" --no-git-tag-version | tail -n1)"
+          new_version="${new_version#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:${new_version}"
+          tmp="$(mktemp)"
+          jq --arg version "$new_version" --arg image "$image" \
+            '.version = $version | .docker_image = $image' \
+            gladys-assistant-integration.json > "$tmp"
+          mv "$tmp" gladys-assistant-integration.json
+          echo "version=${new_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit, tag and push
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json gladys-assistant-integration.json
+          git commit -m "chore(release): ${VERSION}"
+          git tag -a "v${VERSION}" -m "Release ${VERSION}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "v${VERSION}"
+
+  build:
+    needs: prepare
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      version: ${{ needs.prepare.outputs.version }}
