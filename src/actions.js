@@ -71,6 +71,13 @@ export async function pairBridgeAction(manager) {
   if (paired.length > 0) {
     // New credentials available: refresh the device list right away.
     await manager.syncDevices();
+    if (manager.store.persistError) {
+      // The pairing worked, but the credentials could not be written to /data.
+      return {
+        en: `Paired with: ${paired.join(', ')}, and your lights are in the Discovery tab — but the credentials could NOT be saved (${manager.store.persistError.message}). They will be lost when the integration restarts. Check that the integration data volume is writable.`,
+        fr: `Appairage réussi avec : ${paired.join(', ')}, vos lampes sont dans l'onglet Découverte — mais les identifiants n'ont PAS pu être enregistrés (${manager.store.persistError.message}). Ils seront perdus au redémarrage de l'intégration. Vérifiez que le volume de données de l'intégration est accessible en écriture.`,
+      };
+    }
     return {
       en: `Paired successfully with: ${paired.join(', ')}. Your lights are now available in the Discovery tab.`,
       fr: `Appairage réussi avec : ${paired.join(', ')}. Vos lampes sont maintenant disponibles dans l'onglet Découverte.`,

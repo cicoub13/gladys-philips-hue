@@ -30,6 +30,8 @@ export class BridgeStore {
     /** @type {Array<{ id: string, ip: string, username: string }>} */
     this.bridges = [];
     this.loaded = false;
+    /** @type {Error | undefined} Last failure to write the store, if any. */
+    this.persistError = undefined;
   }
 
   /**
@@ -74,8 +76,15 @@ export class BridgeStore {
 
   /**
    * Add or update a paired bridge (keyed by id, falling back to ip), then persist.
+   *
+   * A write failure does NOT fail the pairing: the credentials the bridge just
+   * granted are valid, and dropping them would force the user to press the link
+   * button again for nothing. They are kept in memory so the session works, and
+   * `persistError` is exposed so the caller can warn that they will not survive
+   * a restart — much more useful than an EACCES stack trace reported as
+   * "could not reach the bridge".
    * @param {{ id: string, ip: string, username: string }} bridge - Bridge credentials.
-   * @returns {Promise<void>} Resolves once persisted.
+   * @returns {Promise<void>} Resolves once stored (persisted or in memory only).
    */
   async upsert(bridge) {
     const key = bridge.id || bridge.ip;
@@ -85,7 +94,13 @@ export class BridgeStore {
     } else {
       this.bridges.push(bridge);
     }
-    await this.persist();
+    try {
+      await this.persist();
+      this.persistError = undefined;
+    } catch (error) {
+      this.persistError = error;
+      logger.error(`Could not save the paired bridges to ${this.file} (${error.message}) — pairing is memory-only`);
+    }
   }
 
   /**

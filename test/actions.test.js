@@ -12,10 +12,11 @@ import { normalizeConfig } from '../src/config.js';
  * @param {Array} [options.ssdp] - SSDP responders returned by the fake scan.
  * @returns {object} Manager stub.
  */
-function makeManager({ config = {}, pairResult, ssdp = [] } = {}) {
+function makeManager({ config = {}, pairResult, ssdp = [], persistError } = {}) {
   return {
     config: normalizeConfig(config),
     synced: 0,
+    store: { persistError },
     gladys: {
       async scanNetwork() {
         return ssdp;
@@ -83,6 +84,19 @@ test('pairBridge confirms a successful pairing and refreshes the devices', async
   assertBilingual(message);
   assert.match(message.en, /Paired successfully/);
   assert.equal(manager.synced, 1, 'the lights are published right away');
+});
+
+test('pairBridge warns when the credentials could not be saved', async () => {
+  // Reporting a plain success would be a lie: the pairing is lost on restart.
+  const manager = makeManager({
+    pairResult: { paired: ['192.168.1.42'], pending: [], failed: [] },
+    persistError: new Error("EACCES: permission denied, open '/data/bridges.json'"),
+  });
+  const message = await pairBridgeAction(manager);
+  assertBilingual(message);
+  assert.match(message.en, /could NOT be saved/);
+  assert.match(message.en, /EACCES/, 'the technical cause is quoted for a bug report');
+  assert.match(message.fr, /perdus au redémarrage/);
 });
 
 test('pairBridge asks for the link button when pairing is pending', async () => {

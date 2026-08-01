@@ -27,7 +27,14 @@ COPY src ./src
 COPY gladys-assistant-integration.json ./
 
 ENV NODE_ENV=production
+
 # The only writable location at runtime (paired bridges are stored here).
+# Created and owned by `node` BEFORE the VOLUME declaration: Docker copies the
+# ownership of this directory when it populates an empty volume, otherwise it
+# creates it as root:root and the unprivileged process cannot write its
+# credentials. (A bind mount keeps the host permissions, so this is a floor,
+# not a guarantee — the integration reports the failure instead of crashing.)
+RUN mkdir -p /data && chown node:node /data
 VOLUME ["/data"]
 
 # Run as an unprivileged user (already present in the node image).
