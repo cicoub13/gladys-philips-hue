@@ -10,8 +10,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "node --test",
-    "test:coverage": "node --test --experimental-test-coverage"
+    "test": "node --test --test-timeout=30000",
+    "test:coverage": "node --test --test-timeout=30000 --experimental-test-coverage"
   },
   "engines": {
     "node": ">=20"
