@@ -4,6 +4,7 @@
 # In GitHub: Actions -> Release -> "Run workflow" -> pick patch / minor / major.
 #
 # What it does, in one run:
+#   0. runs the CI quality gate (lint + format + tests) — a red suite stops here;
 #   1. computes the next semver from `package.json` (npm version rules);
 #   2. writes it into `package.json`, `package-lock.json` AND the manifest
 #      (`gladys-assistant-integration.json`: both `version` and the
@@ -27,7 +28,12 @@ on:
           - major
 
 jobs:
+  # Quality gate first: no release is cut on a red test suite.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   prepare:
+    needs: ci
     runs-on: ubuntu-latest
     permissions:
       contents: write

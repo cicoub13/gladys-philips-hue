@@ -1,0 +1,39 @@
+# -----------------------------------------------------------------------------
+# Quality gate: lint, formatting and unit tests.
+#
+# Runs on every push and pull request, and is called by the Release workflow
+# (workflow_call) so a release can never be cut with a red test suite.
+# -----------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches-ignore:
+      - 'gh-pages'
+  pull_request:
+  workflow_call:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Test
+        run: npm test

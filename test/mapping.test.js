@@ -53,10 +53,19 @@ test('getCapabilities detects light features from type', () => {
 
 test('brightness conversion is reversible around the range', () => {
   assert.equal(briToPercent(254), 100);
-  assert.equal(briToPercent(1), 0);
   assert.equal(percentToBri(100), 254);
   assert.equal(percentToBri(0), 1); // Hue bri never goes below 1
   assert.equal(percentToBri(50), 127);
+});
+
+test('a dimly lit light is never reported as 0 %', () => {
+  // 0 % means "off" to featureValueToHueState: reporting it for a light that is
+  // actually on would make Gladys show it off, then switch it off for real.
+  assert.equal(briToPercent(1), 1);
+  assert.deepEqual(featureValueToHueState(FEATURE.BRIGHTNESS, briToPercent(1), extendedColorLight), {
+    on: true,
+    bri: 3,
+  });
 });
 
 test('rgb integer packing round-trips', () => {
@@ -119,4 +128,13 @@ test('featureValueToHueState builds correct Hue payloads', () => {
 
 test('featureValueToHueState throws on unknown kind', () => {
   assert.throws(() => featureValueToHueState('nope', 1, extendedColorLight), /Unknown feature kind/);
+});
+
+test('on/off accepts the value however Gladys types it', () => {
+  for (const on of [1, '1', true]) {
+    assert.deepEqual(featureValueToHueState(FEATURE.ON_OFF, on, extendedColorLight), { on: true }, `value ${on}`);
+  }
+  for (const off of [0, '0', false]) {
+    assert.deepEqual(featureValueToHueState(FEATURE.ON_OFF, off, extendedColorLight), { on: false }, `value ${off}`);
+  }
 });

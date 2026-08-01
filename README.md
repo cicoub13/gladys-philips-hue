@@ -10,30 +10,33 @@ locally via its HTTP API — no Hue cloud account required.
 
 ## Features
 
-- Auto-discovers Hue bridges on the network (N-UPnP) with a manual-IP fallback.
+- Auto-discovers Hue bridges locally (SSDP then mDNS, through the Gladys
+  mediated `network_discovery`), with the Philips N-UPnP cloud endpoint and a
+  manual IP as fallbacks.
 - Press-the-link-button pairing, from a button in the Configuration screen.
 - Exposes each light with the features it supports: **on/off**, **brightness**,
   **color** (RGB ⇄ Hue xy), **white temperature** (mireds).
-- Refreshes light states by polling at a configurable interval.
+- Refreshes light states by polling at a configurable interval, publishing only
+  the values that actually changed.
 
 ## Project structure
 
 ```
 ├─ index.js                          # SDK bootstrap + event wiring (no protocol logic)
 ├─ src/
-│  ├─ config.js                      # config defaults + normalization
+│  ├─ config.js                      # config defaults, validation + normalization
 │  ├─ manager.js                     # orchestration: bridges, dispatch registry, commands
 │  ├─ actions.js                     # manifest action handlers (discover / pair)
 │  └─ hue/
-│     ├─ discovery.js                # N-UPnP bridge discovery
+│     ├─ discovery.js                # bridge discovery: SSDP -> mDNS -> N-UPnP
 │     ├─ bridge.js                   # Hue bridge REST client (fetch, v1 API)
 │     ├─ mapping.js                  # Hue light <-> Gladys features (pure conversions)
 │     └─ store.js                    # persistent paired-bridge credentials (/data)
-├─ test/                             # node:test unit tests (mocked gladys + bridge)
+├─ test/                             # node:test unit tests (mocked gladys + fetch)
 ├─ docs/{en,fr}.md                   # user documentation (linked from Gladys)
-├─ gladys-assistant-integration.json # manifest (config schema + actions)
+├─ gladys-assistant-integration.json # manifest (config schema, actions, network discovery)
 ├─ Dockerfile                        # Node 24 Alpine, read-only rootfs, /data volume
-└─ .github/workflows/                # multi-arch build + UI-driven release
+└─ .github/workflows/                # CI (lint + tests), multi-arch build, UI-driven release
 ```
 
 ## Development
@@ -41,7 +44,9 @@ locally via its HTTP API — no Hue cloud account required.
 ```bash
 npm install
 npm run lint
+npm run format:check
 npm test
+npm run test:coverage   # line/branch coverage report
 ```
 
 Run outside Docker (points the SDK at a local Gladys and a data dir):

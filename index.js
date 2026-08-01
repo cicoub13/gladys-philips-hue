@@ -22,16 +22,14 @@ import { discoverBridgesAction, pairBridgeAction } from './src/actions.js';
 
 const gladys = new GladysIntegration();
 
-// Current configuration (hot-reloaded via onConfigUpdated / on 'connected').
-let config = normalizeConfig();
-
 // The manager owns bridges, the dispatch registry and the Hue protocol.
-const manager = new HueManager(gladys, config);
+// Its config is hot-reloaded via onConfigUpdated / on 'connected'.
+const manager = new HueManager(gladys, normalizeConfig());
 
 // --- Discovery: Gladys asks for the list of devices --------------------------
 gladys.onScanRequest(async () => {
   logger.info('onScanRequest -> publishing Hue lights');
-  await gladys.publishDiscoveredDevices(await manager.buildDiscoveredDevices());
+  await manager.syncDevices();
 });
 
 // --- Command: the user acts on a controllable feature ------------------------
@@ -52,35 +50,22 @@ gladys.onAction('discover_bridges', () => {
 
 gladys.onAction('pair_bridge', () => {
   logger.info('Action pair_bridge');
-  return pairBridgeAction(manager, gladys);
+  return pairBridgeAction(manager);
 });
 
 // --- Configuration updated by the user ---------------------------------------
 gladys.onConfigUpdated(async (newConfig) => {
   logger.info('onConfigUpdated -> new configuration received');
-  config = normalizeConfig(newConfig);
-  manager.setConfig(config);
+  manager.setConfig(normalizeConfig(newConfig));
   // Re-publish: the poll frequency (per-device property) may have changed.
-  await gladys.publishDiscoveredDevices(await manager.buildDiscoveredDevices());
+  await manager.syncDevices();
 });
 
 // --- Connection lifecycle ----------------------------------------------------
 gladys.on('connected', async () => {
   try {
-    config = normalizeConfig(await gladys.getConfig());
-    manager.setConfig(config);
-
-    const devices = await manager.buildDiscoveredDevices();
-    await gladys.publishDiscoveredDevices(devices);
-
-    if (manager.store.list().length === 0) {
-      await gladys.setConnectionStatus(false, {
-        en: 'No Hue bridge paired yet. Use the "Discover bridges" and "Pair bridge" buttons above.',
-        fr: 'Aucun bridge Hue appairé. Utilisez les boutons « Découvrir les bridges » et « Appairer le bridge » ci-dessus.',
-      });
-    } else {
-      await gladys.setConnectionStatus(true);
-    }
+    manager.setConfig(normalizeConfig(await gladys.getConfig()));
+    await manager.syncDevices();
   } catch (err) {
     logger.error('Post-connection initialization failed', err);
     await gladys
