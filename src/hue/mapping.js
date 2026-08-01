@@ -63,12 +63,16 @@ export function getCapabilities(light) {
 }
 
 /**
- * Convert a Hue brightness (1..254) to a Gladys percentage (0..100).
+ * Convert a Hue brightness (1..254) to a Gladys percentage (1..100).
+ *
+ * The result never reaches 0: `featureValueToHueState` reads 0 % as "turn the
+ * light off", so reporting a dimly lit light as 0 % would make Gladys show it as
+ * off and turn it off on the next round-trip.
  * @param {number} bri - Hue brightness.
  * @returns {number} Percentage.
  */
 export function briToPercent(bri) {
-  return Math.round((clamp(bri, HUE_BRI_MIN, HUE_BRI_MAX) / HUE_BRI_MAX) * 100);
+  return Math.max(1, Math.round((clamp(bri, HUE_BRI_MIN, HUE_BRI_MAX) / HUE_BRI_MAX) * 100));
 }
 
 /**
@@ -296,7 +300,8 @@ export function hueStateToFeatureStates(ids, light) {
 export function featureValueToHueState(kind, value, light) {
   switch (kind) {
     case FEATURE.ON_OFF:
-      return { on: value === 1 };
+      // Coerced: Gladys may hand over 1, "1" or true depending on the caller.
+      return { on: Number(value) === 1 };
     case FEATURE.BRIGHTNESS: {
       // 0 % means "off" for the user; anything above turns the light on.
       if (value <= 0) {

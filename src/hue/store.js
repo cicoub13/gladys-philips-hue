@@ -30,6 +30,8 @@ export class BridgeStore {
     /** @type {Array<{ id: string, ip: string, username: string }>} */
     this.bridges = [];
     this.loaded = false;
+    /** @type {Error | undefined} Last failure to write the store, if any. */
+    this.persistError = undefined;
   }
 
   /**
@@ -42,28 +44,47 @@ export class BridgeStore {
       const parsed = JSON.parse(raw);
       this.bridges = Array.isArray(parsed.bridges) ? parsed.bridges : [];
     } catch (error) {
-      if (error.code !== 'ENOENT') {
-        logger.warn(`Could not read bridge store (${error.message}), starting empty`);
+      if (error.code === 'ENOENT') {
+        // First run: nothing paired yet, this is the normal path.
+        this.bridges = [];
+      } else {
+        // Anything else means we HAD credentials and can no longer read them:
+        // the user will have to press the link button again, so say it loudly.
+        logger.error(`Could not read the bridge store (${error.message}) — pairing may have to be redone`);
+        this.bridges = [];
       }
-      this.bridges = [];
     }
     this.loaded = true;
     return this.bridges;
   }
 
   /**
-   * Persist the current bridge list to disk.
+   * Persist the current bridge list to disk, atomically.
+   *
+   * Written to a temporary file then renamed: `rename` is atomic on the same
+   * filesystem, so a power cut can never leave a truncated `bridges.json` —
+   * which `load()` would read as "no bridge paired", silently losing the
+   * pairing and sending the user back to the bridge's link button.
    * @returns {Promise<void>} Resolves once written.
    */
   async persist() {
     await fs.mkdir(path.dirname(this.file), { recursive: true });
-    await fs.writeFile(this.file, JSON.stringify({ bridges: this.bridges }, null, 2), 'utf8');
+    const temporaryFile = `${this.file}.tmp`;
+    await fs.writeFile(temporaryFile, JSON.stringify({ bridges: this.bridges }, null, 2), 'utf8');
+    await fs.rename(temporaryFile, this.file);
   }
 
   /**
    * Add or update a paired bridge (keyed by id, falling back to ip), then persist.
+   *
+   * A write failure does NOT fail the pairing: the credentials the bridge just
+   * granted are valid, and dropping them would force the user to press the link
+   * button again for nothing. They are kept in memory so the session works, and
+   * `persistError` is exposed so the caller can warn that they will not survive
+   * a restart — much more useful than an EACCES stack trace reported as
+   * "could not reach the bridge".
    * @param {{ id: string, ip: string, username: string }} bridge - Bridge credentials.
-   * @returns {Promise<void>} Resolves once persisted.
+   * @returns {Promise<void>} Resolves once stored (persisted or in memory only).
    */
   async upsert(bridge) {
     const key = bridge.id || bridge.ip;
@@ -73,7 +94,13 @@ export class BridgeStore {
     } else {
       this.bridges.push(bridge);
     }
-    await this.persist();
+    try {
+      await this.persist();
+      this.persistError = undefined;
+    } catch (error) {
+      this.persistError = error;
+      logger.error(`Could not save the paired bridges to ${this.file} (${error.message}) — pairing is memory-only`);
+    }
   }
 
   /**

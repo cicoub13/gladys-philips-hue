@@ -9,10 +9,8 @@
   "version": "1.0.3",
   "docker_image": "ghcr.io/cicoub13/gladys-philips-hue:1.0.3",
   "gladys_version": ">=4.62.0",
-  "cover_image": "https://raw.githubusercontent.com/cicoub13/gladys-philips-hue/main/cover.png",
-  "transports": [
-    "local"
-  ],
+  "cover_image": "https://raw.githubusercontent.com/cicoub13/gladys-philips-hue/main/cover.jpg",
+  "transports": ["local"],
   "config_schema": [
     {
       "key": "intro",
@@ -42,19 +40,57 @@
     },
     {
       "key": "poll_frequency",
-      "type": "number",
+      "type": "select",
       "label": {
-        "en": "Refresh interval (s)",
-        "fr": "Intervalle de rafraîchissement (s)"
+        "en": "Refresh interval",
+        "fr": "Intervalle de rafraîchissement"
       },
       "description": {
-        "en": "How often the light states are refreshed from the bridge, in seconds.",
-        "fr": "Fréquence de rafraîchissement de l'état des lampes depuis le bridge, en secondes."
+        "en": "How often the light states are refreshed from the bridge.",
+        "fr": "Fréquence de rafraîchissement de l'état des lampes depuis le bridge."
       },
       "required": false,
-      "default": 60,
-      "min": 5,
-      "max": 3600
+      "default": "60000",
+      "options": [
+        {
+          "value": "10000",
+          "label": {
+            "en": "Every 10 seconds",
+            "fr": "Toutes les 10 secondes"
+          }
+        },
+        {
+          "value": "15000",
+          "label": {
+            "en": "Every 15 seconds",
+            "fr": "Toutes les 15 secondes"
+          }
+        },
+        {
+          "value": "30000",
+          "label": {
+            "en": "Every 30 seconds",
+            "fr": "Toutes les 30 secondes"
+          }
+        },
+        {
+          "value": "60000",
+          "label": {
+            "en": "Every minute",
+            "fr": "Toutes les minutes"
+          }
+        }
+      ]
+    }
+  ],
+  "network_discovery": [
+    {
+      "type": "ssdp",
+      "st": "urn:schemas-upnp-org:device:basic:1"
+    },
+    {
+      "type": "mdns",
+      "service": "_hue._tcp"
     }
   ],
   "actions": [

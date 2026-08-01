@@ -39,7 +39,12 @@ export class HueManager {
     this.gladys = gladys;
     this.config = config;
     this.store = store;
-    /** @type {Map<string, { platformId: string, hueId: string, bridgeIp: string, light: object }>} */
+    /**
+     * @type {Map<string, {
+     *   platformId: string, hueId: string, bridgeIp: string,
+     *   light: object, lastValues: Map<string, number>
+     * }>}
+     */
     this.registry = new Map();
   }
 
@@ -72,19 +77,32 @@ export class HueManager {
   /**
    * Build the Gladys discovery payload for every light of every paired bridge,
    * and (re)populate the dispatch registry.
-   * @returns {Promise<Array<object>>} Discovered devices.
+   *
+   * A bridge we failed to read keeps its previous registry entries: losing them
+   * would break every command and poll of its lights with a misleading "unknown
+   * device" until the next successful scan.
+   * @returns {Promise<{ devices: Array<object>, reachable: number, unreachable: number }>} Scan result.
    */
   async buildDiscoveredDevices() {
-    this.registry.clear();
+    const bridges = this.store.list();
+    const nextRegistry = new Map();
     const devices = [];
+    let unreachable = 0;
 
-    for (const bridge of this.store.list()) {
+    for (const bridge of bridges) {
       const client = this.clientFor(bridge);
       let lights;
       try {
         lights = await client.getLights();
       } catch (error) {
+        unreachable += 1;
         logger.warn(`Could not read lights from bridge ${bridge.ip}: ${error.message}`);
+        // Carry over what we already knew about this bridge's lights.
+        for (const [deviceId, entry] of this.registry) {
+          if (entry.bridgeIp === bridge.ip) {
+            nextRegistry.set(deviceId, entry);
+          }
+        }
         continue;
       }
 
@@ -95,11 +113,63 @@ export class HueManager {
         const payload = lightToDevicePayload(ids, light);
         payload.poll_frequency = this.config.poll_frequency;
         devices.push(payload);
-        this.registry.set(ids.device, { platformId, hueId, bridgeIp: bridge.ip, light });
+        nextRegistry.set(ids.device, {
+          platformId,
+          hueId,
+          bridgeIp: bridge.ip,
+          light,
+          // Last value published per feature, to avoid re-publishing unchanged
+          // states on every poll (Gladys caps at 300 states/minute).
+          lastValues: new Map(),
+        });
       }
     }
 
-    logger.info(`Discovered ${devices.length} light(s) across ${this.store.list().length} bridge(s)`);
+    this.registry = nextRegistry;
+    const reachable = bridges.length - unreachable;
+    logger.info(`Discovered ${devices.length} light(s) across ${reachable}/${bridges.length} reachable bridge(s)`);
+    return { devices, reachable, unreachable };
+  }
+
+  /**
+   * Refresh the device list in Gladys and report the integration status.
+   *
+   * Single entry point used at startup, on reconnection, after a config change
+   * and right after a successful pairing.
+   * @returns {Promise<Array<object>>} The devices published (empty if none).
+   */
+  async syncDevices() {
+    if (this.store.list().length === 0) {
+      await this.gladys.setConnectionStatus(false, {
+        en: 'No Hue bridge paired yet. Use the "Discover bridges" and "Pair bridge" buttons above.',
+        fr: 'Aucun bridge Hue appairé. Utilisez les boutons « Découvrir les bridges » et « Appairer le bridge » ci-dessus.',
+      });
+      return [];
+    }
+
+    const { devices, reachable, unreachable } = await this.buildDiscoveredDevices();
+
+    if (reachable === 0) {
+      // Publishing an empty list here would wipe the Discovery tab because of a
+      // transient network glitch. Keep the previous list and say what is wrong.
+      logger.warn('No bridge reachable, keeping the previously published devices');
+      await this.gladys.setConnectionStatus(false, {
+        en: 'Hue bridge unreachable. Check that it is powered on and on the same network as Gladys.',
+        fr: "Bridge Hue injoignable. Vérifiez qu'il est allumé et sur le même réseau que Gladys.",
+      });
+      return [];
+    }
+
+    await this.gladys.publishDiscoveredDevices(devices);
+
+    if (unreachable > 0) {
+      await this.gladys.setConnectionStatus(false, {
+        en: `${unreachable} Hue bridge(s) unreachable, their lights are unavailable.`,
+        fr: `${unreachable} bridge(s) Hue injoignable(s), leurs lampes sont indisponibles.`,
+      });
+    } else {
+      await this.gladys.setConnectionStatus(true);
+    }
     return devices;
   }
 
@@ -112,13 +182,31 @@ export class HueManager {
   resolve(device) {
     const entry = this.registry.get(device.external_id);
     if (!entry) {
-      throw new Error(`Unknown device ${device.external_id} (run a scan first)`);
+      throw new Error(`Unknown light ${device.external_id}: run a scan from the Discovery tab`);
     }
     const bridge = this.store.list().find((b) => b.ip === entry.bridgeIp);
     if (!bridge) {
-      throw new Error(`Bridge ${entry.bridgeIp} is no longer paired`);
+      throw new Error(`Bridge ${entry.bridgeIp} is no longer paired, pair it again from the Configuration screen`);
     }
     return { entry, bridge, client: this.clientFor(bridge) };
+  }
+
+  /**
+   * Publish feature states, skipping the ones that did not change since the
+   * last publication for this device.
+   * @param {object} entry - Registry entry of the device.
+   * @param {Array<{ external_id: string, value: number }>} states - Candidate states.
+   * @returns {Promise<void>} Resolves once published.
+   */
+  async publishChangedStates(entry, states) {
+    const changed = states.filter((state) => entry.lastValues.get(state.external_id) !== state.value);
+    if (changed.length === 0) {
+      return;
+    }
+    await this.gladys.publishStates(
+      changed.map((state) => ({ device_feature_external_id: state.external_id, state: state.value })),
+    );
+    changed.forEach((state) => entry.lastValues.set(state.external_id, state.value));
   }
 
   /**
@@ -133,14 +221,22 @@ export class HueManager {
     const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
     const kind = FEATURE_KINDS.find((k) => ids.feature(k) === feature.external_id);
     if (!kind) {
-      throw new Error(`Unknown feature ${feature.external_id} on device ${device.external_id}`);
+      throw new Error(`Unknown feature ${feature.external_id} on light ${device.external_id}`);
     }
 
     const hueState = featureValueToHueState(kind, value, entry.light);
     logger.info(`setValue ${feature.external_id} = ${value} -> ${JSON.stringify(hueState)}`);
+    // Throws (and fails the command in Gladys) when the bridge refuses it.
     await client.setLightState(entry.hueId, hueState);
-    // Echo the commanded value back so Gladys reflects it immediately.
-    await this.gladys.publishState(feature.external_id, value);
+
+    // Echo the commanded value back so Gladys reflects it immediately, along
+    // with the on/off state it implies: setting a colour, a temperature or a
+    // non-zero brightness also switches the light ON.
+    const echoed = [{ external_id: feature.external_id, value }];
+    if (kind !== FEATURE.ON_OFF && typeof hueState.on === 'boolean') {
+      echoed.push({ external_id: ids.feature(FEATURE.ON_OFF), value: hueState.on ? 1 : 0 });
+    }
+    await this.publishChangedStates(entry, echoed);
   }
 
   /**
@@ -153,13 +249,7 @@ export class HueManager {
     const light = await client.getLight(entry.hueId);
     entry.light = light; // refresh cached capabilities/state
     const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
-    const states = hueStateToFeatureStates(ids, light).map((s) => ({
-      device_feature_external_id: s.external_id,
-      state: s.value,
-    }));
-    if (states.length > 0) {
-      await this.gladys.publishStates(states);
-    }
+    await this.publishChangedStates(entry, hueStateToFeatureStates(ids, light));
   }
 
   /**
@@ -168,7 +258,7 @@ export class HueManager {
    * @returns {Promise<Array<{ id: string, ip: string }>>} Candidate bridges.
    */
   async candidateBridges() {
-    const discovered = await discoverBridges();
+    const discovered = await discoverBridges(this.gladys);
     const byIp = new Map(discovered.map((b) => [b.ip, b]));
     if (this.config.bridge_ip) {
       byIp.set(this.config.bridge_ip, { id: '', ip: this.config.bridge_ip });
