@@ -7,15 +7,26 @@
 name: CI
 
 on:
+  # Branch pushes are covered by `pull_request`; listening to both would run
+  # everything twice on every PR.
   push:
-    branches-ignore:
-      - 'gh-pages'
+    branches:
+      - main
   pull_request:
   workflow_call:
+
+# Superseded runs are pointless: only the latest commit matters. Keyed on the
+# workflow too, so a push to main never cancels the CI gating a release.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   quality:
     runs-on: ubuntu-latest
+    # Belt and braces with `--test-timeout`: a hanging test must never hold a
+    # runner for hours.
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4

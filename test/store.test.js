@@ -52,10 +52,17 @@ test('BridgeStore writes atomically, never leaving a truncated file', async () =
 });
 
 test('a store that cannot be written keeps the pairing alive and reports why', async () => {
-  // The /data volume may be owned by root while we run unprivileged: losing the
+  // The data volume may be owned by root while we run unprivileged: losing the
   // credentials the bridge just granted would send the user back to the link
   // button for nothing.
-  const store = new BridgeStore('/proc/definitely-not-writable/bridges.json');
+  //
+  // The failure is provoked portably by putting a FILE where the store expects
+  // its parent directory, so mkdir fails the same way on every platform.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hue-store-ro-'));
+  const blocker = path.join(dir, 'not-a-directory');
+  await fs.writeFile(blocker, 'this is a file', 'utf8');
+
+  const store = new BridgeStore(path.join(blocker, 'bridges.json'));
   await store.load();
   await store.upsert({ id: 'b1', ip: '10.0.0.1', username: 'u1' });
 
