@@ -15,6 +15,7 @@
 import { createLogger } from '@gladysassistant/integration-sdk';
 import { HueBridgeClient, HUE_LINK_BUTTON_NOT_PRESSED } from './hue/bridge.js';
 import { discoverBridges } from './hue/discovery.js';
+import { identifyBridges } from './hue/identify.js';
 import { BridgeStore } from './hue/store.js';
 import { FEATURE, featureValueToHueState, hueStateToFeatureStates, lightToDevicePayload } from './hue/mapping.js';
 
@@ -71,7 +72,13 @@ export class HueManager {
    * @returns {HueBridgeClient} Client.
    */
   clientFor(bridge) {
-    return new HueBridgeClient(bridge.ip, bridge.username);
+    // Carry over what pairing learned: the scheme the bridge answers on and the
+    // certificate we pinned, so HTTPS bridges keep working across restarts.
+    return new HueBridgeClient(bridge.ip, bridge.username, {
+      scheme: bridge.scheme,
+      id: bridge.id,
+      certFingerprint: bridge.certFingerprint,
+    });
   }
 
   /**
@@ -267,26 +274,54 @@ export class HueManager {
   }
 
   /**
-   * Try to pair every candidate bridge (the physical link button must have been
-   * pressed). Successfully paired bridges are persisted.
-   * @returns {Promise<{ paired: string[], pending: string[], failed: string[] }>} Result per IP.
+   * The candidates that are PROVEN to be Hue bridges.
+   *
+   * Discovery only reports "something answered"; the manual IP is whatever the
+   * user typed. Both are checked against `/api/config` before anything else
+   * touches them — this is what stops the integration from listing, and trying
+   * to pair with, the printer next door.
+   * @returns {Promise<{ bridges: Array<object>, ignored: string[] }>} Proven bridges and rejected addresses.
+   */
+  async identifiedBridges() {
+    return identifyBridges(await this.candidateBridges());
+  }
+
+  /**
+   * Try to pair every identified bridge (the physical link button must have
+   * been pressed). Successfully paired bridges are persisted.
+   *
+   * The outcome is split per cause so the UI can tell the user what to actually
+   * do next, instead of a single "it failed".
+   * @returns {Promise<{ paired: object[], pending: object[], unreachable: object[], notABridge: string[] }>} Result per bridge.
    */
   async pairBridges() {
-    const candidates = await this.candidateBridges();
-    const result = { paired: [], pending: [], failed: [] };
+    const { bridges, ignored } = await this.identifiedBridges();
+    const result = { paired: [], pending: [], unreachable: [], notABridge: ignored };
 
-    for (const bridge of candidates) {
-      const client = new HueBridgeClient(bridge.ip);
+    for (const bridge of bridges) {
+      // Reuse what identification already learned: the scheme that answered and
+      // the certificate pinned on the way.
+      const client = new HueBridgeClient(bridge.ip, undefined, {
+        scheme: bridge.scheme,
+        id: bridge.id,
+        certFingerprint: bridge.certFingerprint,
+      });
       try {
         const username = await client.createUser(APP_NAME);
-        await this.store.upsert({ id: bridge.id, ip: bridge.ip, username });
-        result.paired.push(bridge.ip);
+        await this.store.upsert({
+          id: bridge.id,
+          ip: bridge.ip,
+          username,
+          scheme: bridge.scheme,
+          ...(client.certFingerprint ? { certFingerprint: client.certFingerprint } : {}),
+        });
+        result.paired.push(bridge);
       } catch (error) {
         if (error.hueErrorType === HUE_LINK_BUTTON_NOT_PRESSED) {
-          result.pending.push(bridge.ip);
+          result.pending.push(bridge);
         } else {
           logger.warn(`Pairing with ${bridge.ip} failed: ${error.message}`);
-          result.failed.push(bridge.ip);
+          result.unreachable.push(bridge);
         }
       }
     }

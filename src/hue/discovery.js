@@ -76,17 +76,27 @@ export function parseSsdpResults(responders) {
 
 /**
  * Keep only the Hue bridges of an mDNS scan result.
- * @param {Array<{ addresses?: string[], txt?: Record<string, string> }>} services - Browsed services.
+ *
+ * An mDNS browse is noisy — printers, speakers and everything else that
+ * announces itself can come back. Requiring evidence of Hue here (and not just
+ * an IP) is what stops the rest of the network from being offered as bridges.
+ * The SDK hands us `[{ name, host, addresses, port, txt }]`.
+ * @param {Array<{ name?: string, addresses?: string[], txt?: Record<string, string> }>} services - Browsed services.
  * @returns {Array<{ id: string, ip: string }>} Hue bridges.
  */
 export function parseMdnsResults(services) {
   return (Array.isArray(services) ? services : [])
     .map((service) => ({
+      // A Hue bridge publishes its id in the TXT record.
       id: String((service.txt && (service.txt.bridgeid || service.txt.bridgeId)) || '').toLowerCase(),
+      // Fallback for firmwares that omit the TXT record: the service instance
+      // name still carries `_hue._tcp` / "Philips Hue".
+      hue: /hue/i.test(String(service.name || '')),
       // IPv4 first: the bridge v1 API is plain HTTP on an IPv4 address.
       ip: (service.addresses || []).find((address) => address.includes('.')) || '',
     }))
-    .filter((bridge) => bridge.ip);
+    .filter((bridge) => bridge.ip && (bridge.id || bridge.hue))
+    .map(({ id, ip }) => ({ id, ip }));
 }
 
 /**

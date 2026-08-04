@@ -65,8 +65,27 @@ test('parseMdnsResults picks the IPv4 address of the service', () => {
 });
 
 test('parseMdnsResults drops a service without a usable address', () => {
-  assert.deepEqual(parseMdnsResults([{ addresses: ['fe80::1'], txt: {} }]), []);
+  assert.deepEqual(parseMdnsResults([{ name: 'Philips Hue', addresses: ['fe80::1'], txt: {} }]), []);
   assert.deepEqual(parseMdnsResults(null), []);
+});
+
+test('parseMdnsResults rejects a responder that is not a Hue bridge', () => {
+  // The reported bug: an mDNS browse also surfaces printers, NAS and speakers.
+  // Having an IPv4 address is NOT evidence of being a Hue bridge — without this
+  // filter they were all offered as bridges, and pairing tried each of them.
+  const others = [
+    { name: 'Brother HL-2030._ipp._tcp.local', addresses: ['192.168.0.243'], txt: {} },
+    { name: 'Living Room Speaker', addresses: ['192.168.0.235'], txt: { model: 'S1' } },
+  ];
+  assert.deepEqual(parseMdnsResults(others), []);
+});
+
+test('parseMdnsResults keeps a bridge whose TXT record lacks the id', () => {
+  // Some firmwares publish no bridgeid in TXT; the service name still says Hue,
+  // and identification will confirm it anyway.
+  assert.deepEqual(parseMdnsResults([{ name: 'Philips Hue - 123456._hue._tcp.local', addresses: ['192.168.1.42'] }]), [
+    { id: '', ip: '192.168.1.42' },
+  ]);
 });
 
 test('discoverBridges finds the bridge on the LAN, without touching the cloud', async () => {

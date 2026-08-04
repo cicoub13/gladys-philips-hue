@@ -269,10 +269,20 @@ test('candidateBridges does not duplicate a manual address already discovered', 
   assert.equal((await manager.candidateBridges()).length, 1);
 });
 
+// A bridge as `identifyBridge` returns it, once proven through /api/config.
+const IDENTIFIED_BRIDGE = {
+  ip: '192.168.1.42',
+  id: 'abc',
+  name: 'Philips hue',
+  model: 'BSB002',
+  apiVersion: '1.63.0',
+  scheme: 'http',
+};
+
 test('pairBridges persists the credentials of a bridge whose button was pressed', async () => {
   const { manager, store } = await makeManager();
   store.bridges.length = 0;
-  manager.candidateBridges = async () => [{ id: 'abc', ip: '192.168.1.42' }];
+  manager.identifiedBridges = async () => ({ bridges: [IDENTIFIED_BRIDGE], ignored: [] });
   mock.method(global, 'fetch', async () => ({
     ok: true,
     status: 200,
@@ -280,17 +290,21 @@ test('pairBridges persists the credentials of a bridge whose button was pressed'
   }));
 
   const result = await manager.pairBridges();
-  assert.deepEqual(result, { paired: ['192.168.1.42'], pending: [], failed: [] });
+  assert.deepEqual(
+    result.paired.map((bridge) => bridge.ip),
+    ['192.168.1.42'],
+  );
   assert.equal(store.list()[0].username, 'granted-key', 'credentials survive a restart');
+  assert.equal(store.list()[0].scheme, 'http', 'the working scheme is remembered');
   mock.restoreAll();
 });
 
-test('pairBridges separates "button not pressed" from a real failure', async () => {
+test('pairBridges separates "button not pressed" from an unreachable bridge', async () => {
   const { manager } = await makeManager();
-  manager.candidateBridges = async () => [
-    { id: '', ip: '192.168.1.42' },
-    { id: '', ip: '192.168.1.43' },
-  ];
+  manager.identifiedBridges = async () => ({
+    bridges: [IDENTIFIED_BRIDGE, { ...IDENTIFIED_BRIDGE, ip: '192.168.1.43' }],
+    ignored: [],
+  });
   mock.method(global, 'fetch', async (url) => {
     if (String(url).includes('192.168.1.42')) {
       return { ok: true, status: 200, json: async () => [{ error: { type: 101, description: 'link button' } }] };
@@ -299,7 +313,63 @@ test('pairBridges separates "button not pressed" from a real failure', async () 
   });
 
   const result = await manager.pairBridges();
-  assert.deepEqual(result.pending, ['192.168.1.42'], 'the user just has to press the button');
-  assert.deepEqual(result.failed, ['192.168.1.43'], 'this one is a network problem');
+  assert.deepEqual(
+    result.pending.map((bridge) => bridge.ip),
+    ['192.168.1.42'],
+    'the user just has to press the button',
+  );
+  assert.deepEqual(
+    result.unreachable.map((bridge) => bridge.ip),
+    ['192.168.1.43'],
+    'this one is a network problem',
+  );
   mock.restoreAll();
+});
+
+test('pairBridges never tries to pair a device that is not a Hue bridge', async () => {
+  // The reported bug: mDNS surfaced a printer and a NAS, and pairing POSTed
+  // /api to both, surfacing "fetch failed" and "HTTP 404" to the user.
+  const { manager } = await makeManager();
+  manager.candidateBridges = async () => [
+    { id: '', ip: '192.168.0.243' },
+    { id: '', ip: '192.168.0.235' },
+  ];
+
+  const calls = [];
+  mock.method(global, 'fetch', async (url, options = {}) => {
+    calls.push(`${options.method || 'GET'} ${url}`);
+    if (String(url).includes('192.168.0.243')) {
+      throw new Error('fetch failed');
+    }
+    // An HTTP server that is not a bridge.
+    return { ok: false, status: 404, json: async () => ({}) };
+  });
+
+  const result = await manager.pairBridges();
+  assert.deepEqual(result.paired, []);
+  assert.deepEqual(result.pending, []);
+  assert.deepEqual(result.notABridge, ['192.168.0.243', '192.168.0.235']);
+  assert.ok(
+    calls.every((call) => !call.startsWith('POST')),
+    `no pairing attempt should be made, got: ${calls.join(' | ')}`,
+  );
+  mock.restoreAll();
+});
+
+test('clientFor carries the scheme and pinned certificate of an HTTPS bridge', async () => {
+  // Without this, a bridge that only answers on TLS would be re-probed as HTTP
+  // on every restart, and its pinned certificate would never be enforced.
+  // A real manager: makeManager() replaces clientFor with a fake client.
+  const manager = new HueManager(makeGladys(), { ...DEFAULT_CONFIG }, new BridgeStore('/tmp/unused-hue-store.json'));
+  const client = manager.clientFor({
+    ip: '192.168.1.42',
+    username: 'granted-key',
+    id: 'abc',
+    scheme: 'https',
+    certFingerprint: 'DEADBEEF',
+  });
+
+  assert.equal(client.scheme, 'https');
+  assert.equal(client.certFingerprint, 'DEADBEEF');
+  assert.equal(client.id, 'abc');
 });

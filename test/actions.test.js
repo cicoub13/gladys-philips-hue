@@ -9,18 +9,18 @@ import { normalizeConfig } from '../src/config.js';
  * @param {object} [options] - Stub options.
  * @param {object} [options.config] - Raw config to normalize.
  * @param {object} [options.pairResult] - Result of pairBridges.
- * @param {Array} [options.ssdp] - SSDP responders returned by the fake scan.
+ * @param {object} [options.identified] - Result of identifiedBridges.
+ * @param {Error} [options.persistError] - Store persistence failure.
  * @returns {object} Manager stub.
  */
-function makeManager({ config = {}, pairResult, ssdp = [], persistError } = {}) {
+function makeManager({ config = {}, pairResult, identified = { bridges: [], ignored: [] }, persistError } = {}) {
   return {
     config: normalizeConfig(config),
     synced: 0,
     store: { persistError },
-    gladys: {
-      async scanNetwork() {
-        return ssdp;
-      },
+    gladys: {},
+    async identifiedBridges() {
+      return identified;
     },
     async pairBridges() {
       return pairResult;
@@ -32,9 +32,14 @@ function makeManager({ config = {}, pairResult, ssdp = [], persistError } = {}) 
   };
 }
 
-const HUE_SSDP_RESPONSE = {
-  LOCATION: 'http://192.168.1.42:80/description.xml',
-  'hue-bridgeid': '001788FFFE123456',
+// A bridge as `identifyBridge` returns it, once proven through /api/config.
+const HUE_BRIDGE = {
+  ip: '192.168.1.42',
+  id: '001788fffe123456',
+  name: 'Philips hue',
+  model: 'BSB002',
+  apiVersion: '1.63.0',
+  scheme: 'http',
 };
 
 /**
@@ -51,24 +56,42 @@ beforeEach(() => resetDiscoveryCache());
 afterEach(() => mock.restoreAll());
 
 test('discoverBridges lists the bridges found and tells what to do next', async () => {
-  const message = await discoverBridgesAction(makeManager({ ssdp: [HUE_SSDP_RESPONSE] }));
+  const message = await discoverBridgesAction(makeManager({ identified: { bridges: [HUE_BRIDGE], ignored: [] } }));
   assertBilingual(message);
   assert.match(message.en, /192\.168\.1\.42/);
   assert.match(message.en, /Pair bridge/);
 });
 
+test('discoverBridges names the bridge and its model, not just an IP', async () => {
+  // Users recognize "Philips hue (BSB002)", not a bare address.
+  const message = await discoverBridgesAction(makeManager({ identified: { bridges: [HUE_BRIDGE], ignored: [] } }));
+  assert.match(message.en, /Philips hue/);
+  assert.match(message.en, /BSB002/);
+});
+
 test('discoverBridges explains what to try when nothing is found', async () => {
-  mock.method(global, 'fetch', async () => ({ ok: true, status: 200, json: async () => [] }));
   const message = await discoverBridgesAction(makeManager());
   assertBilingual(message);
   assert.match(message.en, /No Hue bridge found/);
   assert.match(message.en, /manually/);
 });
 
-test('discoverBridges still reports the manual IP when auto-discovery finds nothing', async () => {
-  mock.method(global, 'fetch', async () => ({ ok: true, status: 200, json: async () => [] }));
-  const message = await discoverBridgesAction(makeManager({ config: { bridge_ip: '10.0.0.5' } }));
-  assert.match(message.en, /10\.0\.0\.5/);
+test('discoverBridges says other devices answered but none was a bridge', async () => {
+  // The exact situation reported by users: mDNS surfaced 3 devices, none Hue.
+  const message = await discoverBridgesAction(
+    makeManager({ identified: { bridges: [], ignored: ['192.168.0.243', '192.168.0.235'] } }),
+  );
+  assertBilingual(message);
+  assert.match(message.en, /No Hue bridge found/);
+  assert.match(message.en, /2 other device\(s\)/);
+  assert.match(message.fr, /aucun n'est un bridge Hue/);
+});
+
+test('discoverBridges mentions the devices it ignored alongside a real bridge', async () => {
+  const message = await discoverBridgesAction(
+    makeManager({ identified: { bridges: [HUE_BRIDGE], ignored: ['192.168.0.235'] } }),
+  );
+  assert.match(message.en, /1 other device\(s\) ignored/);
 });
 
 test('discoverBridges tells the user their address was rejected, instead of ignoring it', async () => {
@@ -78,8 +101,11 @@ test('discoverBridges tells the user their address was rejected, instead of igno
   assert.match(message.en, /192\.168\.1\.42/, 'the message quotes what was typed');
 });
 
+// An empty outcome of every kind, so each test only states what it exercises.
+const NO_PAIRING = { paired: [], pending: [], unreachable: [], notABridge: [] };
+
 test('pairBridge confirms a successful pairing and refreshes the devices', async () => {
-  const manager = makeManager({ pairResult: { paired: ['192.168.1.42'], pending: [], failed: [] } });
+  const manager = makeManager({ pairResult: { ...NO_PAIRING, paired: [HUE_BRIDGE] } });
   const message = await pairBridgeAction(manager);
   assertBilingual(message);
   assert.match(message.en, /Paired successfully/);
@@ -89,7 +115,7 @@ test('pairBridge confirms a successful pairing and refreshes the devices', async
 test('pairBridge warns when the credentials could not be saved', async () => {
   // Reporting a plain success would be a lie: the pairing is lost on restart.
   const manager = makeManager({
-    pairResult: { paired: ['192.168.1.42'], pending: [], failed: [] },
+    pairResult: { ...NO_PAIRING, paired: [HUE_BRIDGE] },
     persistError: new Error("EACCES: permission denied, open '/data/bridges.json'"),
   });
   const message = await pairBridgeAction(manager);
@@ -100,24 +126,34 @@ test('pairBridge warns when the credentials could not be saved', async () => {
 });
 
 test('pairBridge asks for the link button when pairing is pending', async () => {
-  const manager = makeManager({ pairResult: { paired: [], pending: ['192.168.1.42'], failed: [] } });
+  const manager = makeManager({ pairResult: { ...NO_PAIRING, pending: [HUE_BRIDGE] } });
   const message = await pairBridgeAction(manager);
   assertBilingual(message);
-  assert.match(message.en, /Link button not pressed/);
+  assert.match(message.en, /link button was not pressed/);
   assert.match(message.en, /30 seconds/);
   assert.equal(manager.synced, 0);
 });
 
-test('pairBridge reports an unreachable bridge', async () => {
+test('pairBridge distinguishes an unreachable bridge from a missing button', async () => {
+  const message = await pairBridgeAction(makeManager({ pairResult: { ...NO_PAIRING, unreachable: [HUE_BRIDGE] } }));
+  assertBilingual(message);
+  assert.match(message.en, /could not be paired/);
+  assert.doesNotMatch(message.en, /link button/, 'pressing the button would not help here');
+});
+
+test('pairBridge says the network answered but nothing was a Hue bridge', async () => {
+  // Regression guard for the reported bug: pairing used to try random mDNS
+  // devices and report their raw HTTP errors.
   const message = await pairBridgeAction(
-    makeManager({ pairResult: { paired: [], pending: [], failed: ['192.168.1.42'] } }),
+    makeManager({ pairResult: { ...NO_PAIRING, notABridge: ['192.168.0.243', '192.168.0.235'] } }),
   );
   assertBilingual(message);
-  assert.match(message.en, /Could not reach any bridge/);
+  assert.match(message.en, /none is a Hue bridge/);
+  assert.match(message.en, /2 device\(s\)/);
 });
 
 test('pairBridge tells the user to discover first when there is no candidate', async () => {
-  const message = await pairBridgeAction(makeManager({ pairResult: { paired: [], pending: [], failed: [] } }));
+  const message = await pairBridgeAction(makeManager({ pairResult: { ...NO_PAIRING } }));
   assertBilingual(message);
   assert.match(message.en, /No bridge to pair/);
 });
@@ -126,7 +162,7 @@ test('pairBridge blames the rejected address when there is no candidate because 
   const message = await pairBridgeAction(
     makeManager({
       config: { bridge_ip: 'evil.com/api' },
-      pairResult: { paired: [], pending: [], failed: [] },
+      pairResult: { ...NO_PAIRING },
     }),
   );
   assert.match(message.en, /not a valid IP address/);

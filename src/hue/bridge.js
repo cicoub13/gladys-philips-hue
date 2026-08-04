@@ -1,11 +1,14 @@
 // -----------------------------------------------------------------------------
 // Philips Hue bridge REST client (local network, v1 API).
 //
-// We deliberately use the classic HTTP v1 API (`http://<ip>/api/...`):
-//   - it is available on every Hue bridge,
-//   - it avoids the self-signed-certificate problem of the HTTPS CLIP v2 API
-//     (we must never disable TLS verification), and
+// We deliberately use the classic v1 API (`/api/...`):
+//   - it is available on every Hue bridge generation (v1 round, v2 square), and
 //   - it is more than enough to control lights.
+//
+// It is reached over plain HTTP by default, and over HTTPS when the bridge
+// refuses HTTP — Signify is progressively blocking it. The TLS side (private-CA
+// certificate, trust-on-first-use pinning) lives in `./https.js`; this client
+// only carries the `scheme` and the pinned fingerprint around.
 //
 // Two traps this client handles for its callers:
 //   1. the v1 API answers HTTP 200 with a body `[{"error": {...}}]` for MOST
@@ -18,6 +21,7 @@
 // -----------------------------------------------------------------------------
 
 import { createLogger } from '@gladysassistant/integration-sdk';
+import { requestJson } from './https.js';
 
 const logger = createLogger({ name: 'hue-bridge' });
 
@@ -62,10 +66,20 @@ export class HueBridgeClient {
   /**
    * @param {string} ip - Bridge IP address on the local network.
    * @param {string} [username] - Bridge API username (a.k.a. application key).
+   * @param {{ scheme?: string, id?: string, certFingerprint?: string }} [options] - Transport details
+   * resolved at identification time (see `./identify.js`) and persisted by the store.
    */
-  constructor(ip, username) {
+  constructor(ip, username, options = {}) {
     this.ip = ip;
     this.username = username;
+    // Plain HTTP unless identification proved the bridge only answers on TLS.
+    this.scheme = options.scheme === 'https' ? 'https' : 'http';
+    this.id = options.id;
+    // Pinned on the first HTTPS contact, then enforced (see `./https.js`).
+    this.certFingerprint = options.certFingerprint;
+    // Identification probes every discovery candidate and must stay snappy, so
+    // it shortens this; normal traffic keeps the generous default.
+    this.timeoutMs = options.timeoutMs || REQUEST_TIMEOUT_MS;
   }
 
   /**
@@ -79,14 +93,39 @@ export class HueBridgeClient {
   }
 
   /**
-   * Perform one HTTP request to the bridge, with a timeout.
-   * @param {string} path - Path appended to `http://<ip>`.
-   * @param {object} options - Fetch options (method, body...).
+   * Perform one request to the bridge, with a timeout.
+   *
+   * Errors are re-thrown with the username stripped out of the path: they end up
+   * in the Gladys logs and UI, and the username is the key to the whole bridge.
+   * @param {string} path - Path appended to `<scheme>://<ip>`.
+   * @param {object} options - Request options (method, body...).
    * @returns {Promise<any>} Parsed JSON response.
    */
   async fetchOnce(path, options) {
+    // HTTPS needs certificate inspection, which the global `fetch` cannot do:
+    // that path goes through `node:https` (see ./https.js). Plain HTTP keeps
+    // using `fetch` — no TLS to verify, and nothing to gain from switching.
+    if (this.scheme === 'https') {
+      try {
+        const body = await requestJson(`https://${this.ip}${path}`, {
+          ...options,
+          timeoutMs: this.timeoutMs,
+          pinnedFingerprint: this.certFingerprint,
+          bridgeId: this.id,
+        });
+        // First contact: remember what we trusted so the caller can persist it.
+        if (body && body.fingerprint && !this.certFingerprint) {
+          this.certFingerprint = body.fingerprint;
+        }
+        return body;
+      } catch (error) {
+        error.message = this.redact(error.message);
+        throw error;
+      }
+    }
+
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const response = await fetch(`http://${this.ip}${path}`, {
         ...options,
@@ -166,6 +205,15 @@ export class HueBridgeClient {
       return this.username;
     }
     throw new Error(`Unexpected pairing response from bridge ${this.ip}`);
+  }
+
+  /**
+   * Read the unauthenticated bridge description (`bridgeid`, `modelid`,
+   * `apiversion`...). Also the endpoint used to prove a device IS a bridge.
+   * @returns {Promise<object>} The bridge configuration.
+   */
+  async getConfig(options = {}) {
+    return this.request('/api/config', options);
   }
 
   /**
