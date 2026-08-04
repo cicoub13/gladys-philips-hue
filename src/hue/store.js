@@ -83,7 +83,10 @@ export class BridgeStore {
    * `persistError` is exposed so the caller can warn that they will not survive
    * a restart — much more useful than an EACCES stack trace reported as
    * "could not reach the bridge".
-   * @param {{ id: string, ip: string, username: string }} bridge - Bridge credentials.
+   * @param {{ id: string, ip: string, username: string, scheme?: string, certFingerprint?: string }} bridge -
+   * Bridge credentials, plus the transport learned at pairing time: the scheme the bridge answers on and, for
+   * HTTPS bridges, the certificate fingerprint pinned on first contact. Entries saved by older versions simply
+   * have neither and fall back to plain HTTP.
    * @returns {Promise<void>} Resolves once stored (persisted or in memory only).
    */
   async upsert(bridge) {
