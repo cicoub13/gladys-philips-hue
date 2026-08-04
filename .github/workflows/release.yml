@@ -64,6 +64,12 @@ jobs:
             '.version = $version | .docker_image = $image' \
             gladys-assistant-integration.json > "$tmp"
           mv "$tmp" gladys-assistant-integration.json
+
+          # jq re-indents the whole document in its own style, which does NOT
+          # match Prettier: without this, every release commits a manifest that
+          # fails the `format:check` gate of CI on main.
+          npx --yes prettier@3 --write gladys-assistant-integration.json
+
           echo "version=${new_version}" >> "$GITHUB_OUTPUT"
 
       - name: Commit, tag and push
