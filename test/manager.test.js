@@ -142,6 +142,36 @@ test('setValue rejects a feature that does not belong to the light', async () =>
   );
 });
 
+test('setValue rejects malformed values before contacting the bridge', async () => {
+  const { manager, gladys, client } = await makeManager();
+  const deviceId = await firstDeviceId(manager);
+  const ids = gladys.externalIds('light', manager.registry.get(deviceId).platformId);
+
+  await assert.rejects(
+    () => manager.setValue({ external_id: deviceId }, { external_id: ids.feature(FEATURE.BRIGHTNESS) }, 'NaN'),
+    /finite number/,
+  );
+  await assert.rejects(
+    () => manager.setValue({ external_id: deviceId }, { external_id: ids.feature(FEATURE.BRIGHTNESS) }, 101),
+    /0\.\.100/,
+  );
+  assert.equal(client.lastSetState, null);
+  assert.deepEqual(gladys.recorded.states, []);
+});
+
+test('setValue echoes the normalized value actually sent to Hue', async () => {
+  const { manager, gladys, client } = await makeManager();
+  const deviceId = await firstDeviceId(manager);
+  const ids = gladys.externalIds('light', manager.registry.get(deviceId).platformId);
+
+  await manager.setValue({ external_id: deviceId }, { external_id: ids.feature(FEATURE.TEMPERATURE) }, 300.4);
+  assert.deepEqual(client.lastSetState, { id: '3', state: { on: true, ct: 300 } });
+  const temperature = gladys.recorded.states.find(
+    (state) => state.device_feature_external_id === ids.feature(FEATURE.TEMPERATURE),
+  );
+  assert.equal(temperature.state, 300);
+});
+
 test('poll publishes the current light states', async () => {
   const { manager, gladys } = await makeManager();
   const deviceId = await firstDeviceId(manager);

@@ -17,7 +17,13 @@ import { HueBridgeClient, HUE_LINK_BUTTON_NOT_PRESSED } from './hue/bridge.js';
 import { discoverBridges } from './hue/discovery.js';
 import { identifyBridges } from './hue/identify.js';
 import { BridgeStore } from './hue/store.js';
-import { FEATURE, featureValueToHueState, hueStateToFeatureStates, lightToDevicePayload } from './hue/mapping.js';
+import {
+  FEATURE,
+  featureValueToHueState,
+  hueStateToFeatureStates,
+  lightToDevicePayload,
+  normalizeFeatureValue,
+} from './hue/mapping.js';
 
 const logger = createLogger({ name: 'hue-manager' });
 
@@ -258,15 +264,16 @@ export class HueManager {
       throw new Error(`Unknown feature ${feature.external_id} on light ${device.external_id}`);
     }
 
-    const hueState = featureValueToHueState(kind, value, entry.light);
-    logger.info(`setValue ${feature.external_id} = ${value} -> ${JSON.stringify(hueState)}`);
+    const normalizedValue = normalizeFeatureValue(kind, value, entry.light);
+    const hueState = featureValueToHueState(kind, normalizedValue, entry.light);
+    logger.info(`setValue ${feature.external_id} = ${normalizedValue} -> ${JSON.stringify(hueState)}`);
     // Throws (and fails the command in Gladys) when the bridge refuses it.
     await client.setLightState(entry.hueId, hueState);
 
     // Echo the commanded value back so Gladys reflects it immediately, along
     // with the on/off state it implies: setting a colour, a temperature or a
     // non-zero brightness also switches the light ON.
-    const echoed = [{ external_id: feature.external_id, value }];
+    const echoed = [{ external_id: feature.external_id, value: normalizedValue }];
     if (kind !== FEATURE.ON_OFF && typeof hueState.on === 'boolean') {
       echoed.push({ external_id: ids.feature(FEATURE.ON_OFF), value: hueState.on ? 1 : 0 });
     }

@@ -291,6 +291,57 @@ export function hueStateToFeatureStates(ids, light) {
 }
 
 /**
+ * Validate and normalize a command at the integration boundary. The SDK types
+ * are advisory at runtime, so malformed or out-of-range values must never be
+ * serialized as `null`/NaN or echoed back as impossible Gladys states.
+ * @param {string} kind - One of the FEATURE.* keys.
+ * @param {unknown} value - Value coming from Gladys.
+ * @param {object} light - Hue light object (for its ct bounds).
+ * @returns {number} Finite, in-range value in Gladys units.
+ */
+export function normalizeFeatureValue(kind, value, light) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    throw new TypeError(`Invalid ${kind} value: expected a finite number`);
+  }
+
+  let min;
+  let max;
+  switch (kind) {
+    case FEATURE.ON_OFF:
+      min = 0;
+      max = 1;
+      break;
+    case FEATURE.BRIGHTNESS:
+      min = 0;
+      max = 100;
+      break;
+    case FEATURE.COLOR:
+      min = 0;
+      max = 0xffffff;
+      break;
+    case FEATURE.TEMPERATURE: {
+      const range = ctRange(light);
+      min = range.min;
+      max = range.max;
+      break;
+    }
+    default:
+      throw new Error(`Unknown feature kind: ${kind}`);
+  }
+
+  if (numeric < min || numeric > max) {
+    throw new RangeError(`Invalid ${kind} value: expected ${min}..${max}`);
+  }
+  if (kind === FEATURE.ON_OFF && numeric !== 0 && numeric !== 1) {
+    throw new RangeError(`Invalid ${kind} value: expected 0 or 1`);
+  }
+  return kind === FEATURE.COLOR || kind === FEATURE.TEMPERATURE || kind === FEATURE.ON_OFF
+    ? Math.round(numeric)
+    : numeric;
+}
+
+/**
  * Translate a Gladys command (feature kind + value) into a Hue state payload.
  * @param {string} kind - One of the FEATURE.* keys.
  * @param {number} value - Value coming from Gladys.
@@ -298,23 +349,22 @@ export function hueStateToFeatureStates(ids, light) {
  * @returns {object} Hue state payload for `setLightState`.
  */
 export function featureValueToHueState(kind, value, light) {
+  const normalized = normalizeFeatureValue(kind, value, light);
   switch (kind) {
     case FEATURE.ON_OFF:
       // Coerced: Gladys may hand over 1, "1" or true depending on the caller.
-      return { on: Number(value) === 1 };
+      return { on: normalized === 1 };
     case FEATURE.BRIGHTNESS: {
       // 0 % means "off" for the user; anything above turns the light on.
-      if (value <= 0) {
+      if (normalized === 0) {
         return { on: false };
       }
-      return { on: true, bri: percentToBri(value) };
+      return { on: true, bri: percentToBri(normalized) };
     }
     case FEATURE.COLOR:
-      return { on: true, xy: rgbToXy(value) };
-    case FEATURE.TEMPERATURE: {
-      const range = ctRange(light);
-      return { on: true, ct: clamp(Math.round(value), range.min, range.max) };
-    }
+      return { on: true, xy: rgbToXy(normalized) };
+    case FEATURE.TEMPERATURE:
+      return { on: true, ct: normalized };
     default:
       throw new Error(`Unknown feature kind: ${kind}`);
   }

@@ -12,6 +12,7 @@ import {
   lightToDevicePayload,
   hueStateToFeatureStates,
   featureValueToHueState,
+  normalizeFeatureValue,
 } from '../src/hue/mapping.js';
 
 // Minimal external-ids helper mimicking gladys.externalIds(type, platformId).
@@ -118,8 +119,8 @@ test('featureValueToHueState builds correct Hue payloads', () => {
   assert.deepEqual(featureValueToHueState(FEATURE.BRIGHTNESS, 0, extendedColorLight), { on: false });
   assert.deepEqual(featureValueToHueState(FEATURE.BRIGHTNESS, 100, extendedColorLight), { on: true, bri: 254 });
 
-  const temp = featureValueToHueState(FEATURE.TEMPERATURE, 9999, extendedColorLight);
-  assert.equal(temp.ct, 500, 'ct is clamped to the light max');
+  const temp = featureValueToHueState(FEATURE.TEMPERATURE, 300.4, extendedColorLight);
+  assert.equal(temp.ct, 300, 'ct is normalized to an integer');
 
   const color = featureValueToHueState(FEATURE.COLOR, 0xff0000, extendedColorLight);
   assert.equal(color.on, true);
@@ -128,6 +129,14 @@ test('featureValueToHueState builds correct Hue payloads', () => {
 
 test('featureValueToHueState throws on unknown kind', () => {
   assert.throws(() => featureValueToHueState('nope', 1, extendedColorLight), /Unknown feature kind/);
+});
+
+test('feature commands reject non-finite and out-of-range values', () => {
+  assert.throws(() => normalizeFeatureValue(FEATURE.BRIGHTNESS, Number.NaN, extendedColorLight), /finite number/);
+  assert.throws(() => featureValueToHueState(FEATURE.BRIGHTNESS, 101, extendedColorLight), /0\.\.100/);
+  assert.throws(() => featureValueToHueState(FEATURE.COLOR, -1, extendedColorLight), /0\.\.16777215/);
+  assert.throws(() => featureValueToHueState(FEATURE.TEMPERATURE, 501, extendedColorLight), /153\.\.500/);
+  assert.throws(() => featureValueToHueState(FEATURE.ON_OFF, 0.5, extendedColorLight), /0 or 1/);
 });
 
 test('on/off accepts the value however Gladys types it', () => {
