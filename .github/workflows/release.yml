@@ -41,14 +41,17 @@ jobs:
       version: ${{ steps.bump.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
+
+      - name: Install locked release tooling
+        run: npm ci --ignore-scripts
 
       - name: Bump version and update the manifest
         id: bump
@@ -68,7 +71,7 @@ jobs:
           # jq re-indents the whole document in its own style, which does NOT
           # match Prettier: without this, every release commits a manifest that
           # fails the `format:check` gate of CI on main.
-          npx --yes prettier@3 --write gladys-assistant-integration.json
+          ./node_modules/.bin/prettier --write gladys-assistant-integration.json
 
           echo "version=${new_version}" >> "$GITHUB_OUTPUT"
 
