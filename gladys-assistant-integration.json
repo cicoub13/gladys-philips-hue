@@ -39,6 +39,36 @@
       "default": ""
     },
     {
+      "key": "allow_insecure_http",
+      "type": "select",
+      "label": {
+        "en": "Allow legacy unencrypted HTTP",
+        "fr": "Autoriser le HTTP non chiffré hérité"
+      },
+      "description": {
+        "en": "Disabled by default. Enable only for an old bridge that cannot use HTTPS: its pairing key and commands can be observed by another device on the network.",
+        "fr": "Désactivé par défaut. À activer uniquement pour un ancien bridge incompatible avec HTTPS : sa clé d'appairage et ses commandes peuvent être observées par un autre appareil du réseau."
+      },
+      "required": false,
+      "default": "false",
+      "options": [
+        {
+          "value": "false",
+          "label": {
+            "en": "No (recommended)",
+            "fr": "Non (recommandé)"
+          }
+        },
+        {
+          "value": "true",
+          "label": {
+            "en": "Yes, allow insecure HTTP",
+            "fr": "Oui, autoriser le HTTP non chiffré"
+          }
+        }
+      ]
+    },
+    {
       "key": "poll_frequency",
       "type": "select",
       "label": {

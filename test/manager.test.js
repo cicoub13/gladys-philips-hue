@@ -228,6 +228,19 @@ test('syncDevices reports the missing pairing when no bridge is stored', async (
   assert.match(gladys.recorded.connectionStatus.at(-1).message.en, /No Hue bridge paired/);
 });
 
+test('syncDevices reports when stored legacy HTTP credentials are disabled', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hue-http-disabled-'));
+  const store = new BridgeStore(path.join(dir, 'bridges.json'));
+  await store.load();
+  await store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-1', scheme: 'http' });
+  const gladys = makeGladys();
+  const manager = new HueManager(gladys, { ...DEFAULT_CONFIG }, store);
+
+  assert.deepEqual(await manager.syncDevices(), []);
+  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, false);
+  assert.match(gladys.recorded.connectionStatus.at(-1).message.en, /legacy HTTP fallback/);
+});
+
 test('syncDevices reports a healthy connection once lights are published', async () => {
   const { manager, gladys } = await makeManager();
   await manager.syncDevices();
@@ -281,6 +294,7 @@ const IDENTIFIED_BRIDGE = {
 
 test('pairBridges persists the credentials of a bridge whose button was pressed', async () => {
   const { manager, store } = await makeManager();
+  manager.config.allow_insecure_http = true;
   store.bridges.length = 0;
   manager.identifiedBridges = async () => ({ bridges: [IDENTIFIED_BRIDGE], ignored: [] });
   mock.method(global, 'fetch', async () => ({
@@ -301,6 +315,7 @@ test('pairBridges persists the credentials of a bridge whose button was pressed'
 
 test('pairBridges separates "button not pressed" from an unreachable bridge', async () => {
   const { manager } = await makeManager();
+  manager.config.allow_insecure_http = true;
   manager.identifiedBridges = async () => ({
     bridges: [IDENTIFIED_BRIDGE, { ...IDENTIFIED_BRIDGE, ip: '192.168.1.43' }],
     ignored: [],
@@ -324,6 +339,15 @@ test('pairBridges separates "button not pressed" from an unreachable bridge', as
     'this one is a network problem',
   );
   mock.restoreAll();
+});
+
+test('pairBridges blocks a legacy HTTP bridge unless the user opted in', async () => {
+  const { manager } = await makeManager();
+  manager.identifiedBridges = async () => ({ bridges: [IDENTIFIED_BRIDGE], ignored: [] });
+
+  const result = await manager.pairBridges();
+  assert.deepEqual(result.paired, []);
+  assert.deepEqual(result.insecure, [IDENTIFIED_BRIDGE]);
 });
 
 test('pairBridges never tries to pair a device that is not a Hue bridge', async () => {
@@ -372,4 +396,13 @@ test('clientFor carries the scheme and pinned certificate of an HTTPS bridge', a
   assert.equal(client.scheme, 'https');
   assert.equal(client.certFingerprint, 'DEADBEEF');
   assert.equal(client.id, 'abc');
+});
+
+test('clientFor refuses stored HTTP credentials unless legacy mode is enabled', () => {
+  const manager = new HueManager(makeGladys(), { ...DEFAULT_CONFIG }, new BridgeStore('/tmp/unused-hue-store.json'));
+  const bridge = { ip: '192.168.1.42', username: 'granted-key', id: 'abc', scheme: 'http' };
+
+  assert.throws(() => manager.clientFor(bridge), /insecure HTTP/);
+  manager.config.allow_insecure_http = true;
+  assert.equal(manager.clientFor(bridge).scheme, 'http');
 });

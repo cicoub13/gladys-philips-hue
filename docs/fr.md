@@ -32,6 +32,11 @@ Les états sont rafraîchis par interrogation à l'intervalle choisi dans
 4. Dans les 30 secondes, cliquez sur **Appairer le bridge**. En cas de succès,
    vos lampes apparaissent dans l'onglet **Découverte**, prêtes à être créées.
 
+HTTPS est requis par défaut. Si un ancien bridge ne prend en charge que HTTP,
+mettez d'abord son micrologiciel à jour. En dernier recours, activez **Autoriser
+le HTTP non chiffré hérité** dans Configuration ; un autre appareil du réseau
+local pourrait alors observer la clé d'appairage et les commandes.
+
 ## Comment le bridge est trouvé
 
 Trois méthodes sont tentées, dans cet ordre, et la première qui trouve un bridge
@@ -75,8 +80,9 @@ d'adresse IP (fixez-la dans votre box), puis relancez une découverte.
   lectures d'état vont directement au bridge sur votre réseau. Seule l'étape de
   découverte de dernier recours ci-dessus peut contacter un serveur Philips, et
   uniquement pendant que vous cherchez votre bridge.
-- Le conteneur doit pouvoir joindre le bridge sur votre réseau local (HTTP sur le
-  port 80, ou HTTPS si votre bridge n'accepte plus le HTTP simple).
+- Le conteneur doit pouvoir joindre le bridge sur votre réseau local via HTTPS.
+  Le HTTP simple sur le port 80 n'est disponible qu'avec l'option de compatibilité
+  héritée explicitement activée.
 - **Sécurité du HTTPS** : un bridge Hue présente un certificat émis par Philips
   et non par une autorité publique. Lors du premier contact, l'intégration
   vérifie que ce certificat porte bien l'identifiant du bridge, puis en mémorise

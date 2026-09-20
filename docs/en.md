@@ -31,6 +31,11 @@ interval** (default: every minute).
 4. Within 30 seconds, click **Pair bridge**. On success, your lights appear in
    the **Discovery** tab, ready to be created as devices.
 
+HTTPS is required by default. If an older bridge only supports HTTP, update its
+firmware first. As a last resort, enable **Allow legacy unencrypted HTTP** in
+Configuration; another device on the LAN could then observe the pairing key and
+commands.
+
 ## How the bridge is found
 
 Three methods are tried, in order, and the first one that finds a bridge wins:
@@ -71,8 +76,8 @@ again within the next 30 seconds.
 - Controlling your lights is always **100 % local**: commands and state reads go
   straight to the bridge over your LAN. Only the last-resort discovery step
   above may contact a Philips server, and only while you look for your bridge.
-- The container must be able to reach the bridge on your LAN (HTTP on port 80,
-  or HTTPS if your bridge no longer accepts plain HTTP).
+- The container must be able to reach the bridge on your LAN over HTTPS. Plain
+  HTTP on port 80 is available only through the explicit legacy fallback.
 - **HTTPS security**: a Hue bridge serves a certificate issued by Philips rather
   than by a public authority. On first contact the integration checks that this
   certificate carries the bridge's own identifier, then remembers its

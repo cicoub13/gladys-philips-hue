@@ -102,7 +102,7 @@ test('discoverBridges tells the user their address was rejected, instead of igno
 });
 
 // An empty outcome of every kind, so each test only states what it exercises.
-const NO_PAIRING = { paired: [], pending: [], unreachable: [], notABridge: [] };
+const NO_PAIRING = { paired: [], pending: [], unreachable: [], insecure: [], notABridge: [] };
 
 test('pairBridge confirms a successful pairing and refreshes the devices', async () => {
   const manager = makeManager({ pairResult: { ...NO_PAIRING, paired: [HUE_BRIDGE] } });
@@ -139,6 +139,14 @@ test('pairBridge distinguishes an unreachable bridge from a missing button', asy
   assertBilingual(message);
   assert.match(message.en, /could not be paired/);
   assert.doesNotMatch(message.en, /link button/, 'pressing the button would not help here');
+});
+
+test('pairBridge explains how to opt in when a legacy HTTP bridge is blocked', async () => {
+  const message = await pairBridgeAction(makeManager({ pairResult: { ...NO_PAIRING, insecure: [HUE_BRIDGE] } }));
+  assertBilingual(message);
+  assert.match(message.en, /blocked/);
+  assert.match(message.en, /legacy HTTP fallback/);
+  assert.match(message.fr, /HTTP non chiffré/);
 });
 
 test('pairBridge says the network answered but nothing was a Hue bridge', async () => {

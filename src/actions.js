@@ -87,7 +87,7 @@ export async function discoverBridgesAction(manager) {
  * @returns {Promise<{ en: string, fr: string }>} Message shown under the button.
  */
 export async function pairBridgeAction(manager) {
-  const { paired, pending, unreachable, notABridge } = await manager.pairBridges();
+  const { paired, pending, unreachable, insecure = [], notABridge } = await manager.pairBridges();
 
   if (paired.length > 0) {
     const names = paired.map((bridge) => describeBridge(bridge)).join(', ');
@@ -121,6 +121,14 @@ export async function pairBridgeAction(manager) {
     return {
       en: `A Hue bridge was found but could not be paired: ${names}. Check that it stays reachable from Gladys, then try again.`,
       fr: `Un bridge Hue a été trouvé mais n'a pas pu être appairé : ${names}. Vérifiez qu'il reste joignable depuis Gladys, puis réessayez.`,
+    };
+  }
+
+  if (insecure.length > 0) {
+    const names = insecure.map((bridge) => describeBridge(bridge)).join(', ');
+    return {
+      en: `Pairing was blocked because this legacy bridge only offers unencrypted HTTP: ${names}. If HTTPS is unavailable after updating the bridge, explicitly enable the legacy HTTP fallback in Configuration and try again.`,
+      fr: `L'appairage a été bloqué car ce bridge ancien ne propose que le HTTP non chiffré : ${names}. Si HTTPS reste indisponible après la mise à jour du bridge, activez explicitement l'option HTTP hérité dans Configuration puis réessayez.`,
     };
   }
 

@@ -5,6 +5,7 @@ import { normalizeConfig, isValidBridgeHost, DEFAULT_CONFIG, POLL_FREQUENCIES } 
 test('normalizeConfig returns defaults when empty', () => {
   const config = normalizeConfig();
   assert.equal(config.bridge_ip, DEFAULT_CONFIG.bridge_ip);
+  assert.equal(config.allow_insecure_http, false);
   assert.equal(config.poll_frequency, DEFAULT_CONFIG.poll_frequency);
 });
 
@@ -18,9 +19,20 @@ test('every default and option is a poll frequency Gladys accepts', () => {
 });
 
 test('normalizeConfig accepts the select values as strings and trims the IP', () => {
-  const config = normalizeConfig({ bridge_ip: '  192.168.1.42  ', poll_frequency: '15000' });
+  const config = normalizeConfig({
+    bridge_ip: '  192.168.1.42  ',
+    allow_insecure_http: 'true',
+    poll_frequency: '15000',
+  });
   assert.equal(config.bridge_ip, '192.168.1.42');
+  assert.equal(config.allow_insecure_http, true);
   assert.equal(config.poll_frequency, 15000);
+});
+
+test('legacy HTTP stays disabled unless explicitly enabled', () => {
+  assert.equal(normalizeConfig({ allow_insecure_http: 'false' }).allow_insecure_http, false);
+  assert.equal(normalizeConfig({ allow_insecure_http: 'yes' }).allow_insecure_http, false);
+  assert.equal(normalizeConfig({ allow_insecure_http: true }).allow_insecure_http, true);
 });
 
 test('normalizeConfig falls back to the default on a frequency Gladys would reject', () => {

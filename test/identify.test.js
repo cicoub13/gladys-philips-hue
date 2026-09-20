@@ -65,25 +65,25 @@ test('identifyBridge proves a bridge over plain HTTP', async () => {
     return jsonResponse(BRIDGE_CONFIG);
   });
 
-  const identity = await identifyBridge('192.168.1.42', '001788fffe123456');
+  const identity = await identifyBridge('192.168.1.42', '001788fffe123456', { schemes: ['http'] });
   assert.equal(identity.id, '001788fffe123456');
   assert.equal(identity.scheme, 'http');
 });
 
 test('identifyBridge rejects a bridge id that disagrees with discovery', async () => {
   stubFetch(() => jsonResponse(BRIDGE_CONFIG));
-  assert.equal(await identifyBridge('192.168.1.42', 'some-other-bridge'), undefined);
+  assert.equal(await identifyBridge('192.168.1.42', 'some-other-bridge', { schemes: ['http'] }), undefined);
 });
 
 test('identifyBridge rejects a device that answers but is not a bridge', async () => {
   // 192.168.0.235 in the bug report: an HTTP server, but not Hue.
   stubFetch(() => jsonResponse({ name: 'My NAS' }));
-  assert.equal(await identifyBridge('192.168.0.235'), undefined);
+  assert.equal(await identifyBridge('192.168.0.235', '', { schemes: ['http'] }), undefined);
 });
 
 test('identifyBridge rejects a 404, without trying to pair', async () => {
   stubFetch(() => ({ ok: false, status: 404, json: async () => ({}) }));
-  assert.equal(await identifyBridge('192.168.0.235'), undefined);
+  assert.equal(await identifyBridge('192.168.0.235', '', { schemes: ['http'] }), undefined);
 });
 
 test('identifyBridge rejects an address where nothing listens', async () => {
@@ -91,14 +91,12 @@ test('identifyBridge rejects an address where nothing listens', async () => {
   stubFetch(() => {
     throw new Error('fetch failed');
   });
-  assert.equal(await identifyBridge('192.168.0.243'), undefined);
+  assert.equal(await identifyBridge('192.168.0.243', '', { schemes: ['http'] }), undefined);
 });
 
-test('identifyBridge does not try HTTPS when HTTP already answered', async () => {
-  // A device that answers "I am not a bridge" is settled; probing it again over
-  // TLS only slows the Discover button down.
+test('identifyBridge stops once a transport proves the device is not a bridge', async () => {
   const fetchMock = stubFetch(() => jsonResponse({ name: 'My NAS' }));
-  await identifyBridge('192.168.0.235');
+  await identifyBridge('192.168.0.235', '', { schemes: ['http', 'https'] });
   assert.equal(fetchMock.mock.callCount(), 1);
 });
 
@@ -110,11 +108,10 @@ test('identifyBridges sorts the proven bridges from the rest', async () => {
     throw new Error('fetch failed');
   });
 
-  const { bridges, ignored } = await identifyBridges([
-    { ip: '192.168.0.243' },
-    { ip: '192.168.1.42' },
-    { ip: '192.168.0.235' },
-  ]);
+  const { bridges, ignored } = await identifyBridges(
+    [{ ip: '192.168.0.243' }, { ip: '192.168.1.42' }, { ip: '192.168.0.235' }],
+    { schemes: ['http'] },
+  );
 
   assert.deepEqual(
     bridges.map((bridge) => bridge.ip),

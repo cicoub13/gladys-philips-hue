@@ -13,6 +13,8 @@ locally via its HTTP API — no Hue cloud account required.
 - Auto-discovers Hue bridges locally (SSDP then mDNS, through the Gladys
   mediated `network_discovery`), with the Philips N-UPnP cloud endpoint and a
   manual IP as fallbacks.
+- Uses pinned HTTPS by default; legacy unencrypted HTTP requires an explicit
+  compatibility setting.
 - Press-the-link-button pairing, from a button in the Configuration screen.
 - Exposes each light with the features it supports: **on/off**, **brightness**,
   **color** (RGB ⇄ Hue xy), **white temperature** (mireds).

@@ -30,6 +30,8 @@ const APP_NAME = 'gladys#philips-hue';
 // Every FEATURE kind we may have to dispatch a command to.
 const FEATURE_KINDS = [FEATURE.ON_OFF, FEATURE.BRIGHTNESS, FEATURE.COLOR, FEATURE.TEMPERATURE];
 
+export const HUE_INSECURE_HTTP_DISABLED = 'HUE_INSECURE_HTTP_DISABLED';
+
 export class HueManager {
   /**
    * @param {object} gladys - The GladysIntegration SDK instance.
@@ -72,6 +74,14 @@ export class HueManager {
    * @returns {HueBridgeClient} Client.
    */
   clientFor(bridge) {
+    const scheme = bridge.scheme === 'https' ? 'https' : 'http';
+    if (scheme === 'http' && !this.config.allow_insecure_http) {
+      const error = new Error(
+        `Bridge ${bridge.ip} only offers insecure HTTP; explicitly enable the legacy HTTP fallback to use it`,
+      );
+      error.code = HUE_INSECURE_HTTP_DISABLED;
+      throw error;
+    }
     // Carry over what pairing learned: the scheme the bridge answers on and the
     // certificate we pinned, so HTTPS bridges keep working across restarts.
     return new HueBridgeClient(bridge.ip, bridge.username, {
@@ -88,21 +98,25 @@ export class HueManager {
    * A bridge we failed to read keeps its previous registry entries: losing them
    * would break every command and poll of its lights with a misleading "unknown
    * device" until the next successful scan.
-   * @returns {Promise<{ devices: Array<object>, reachable: number, unreachable: number }>} Scan result.
+   * @returns {Promise<{ devices: Array<object>, reachable: number, unreachable: number, insecure: number }>} Scan result.
    */
   async buildDiscoveredDevices() {
     const bridges = this.store.list();
     const nextRegistry = new Map();
     const devices = [];
     let unreachable = 0;
+    let insecure = 0;
 
     for (const bridge of bridges) {
-      const client = this.clientFor(bridge);
       let lights;
       try {
+        const client = this.clientFor(bridge);
         lights = await client.getLights();
       } catch (error) {
         unreachable += 1;
+        if (error.code === HUE_INSECURE_HTTP_DISABLED) {
+          insecure += 1;
+        }
         logger.warn(`Could not read lights from bridge ${bridge.ip}: ${error.message}`);
         // Carry over what we already knew about this bridge's lights.
         for (const [deviceId, entry] of this.registry) {
@@ -135,7 +149,7 @@ export class HueManager {
     this.registry = nextRegistry;
     const reachable = bridges.length - unreachable;
     logger.info(`Discovered ${devices.length} light(s) across ${reachable}/${bridges.length} reachable bridge(s)`);
-    return { devices, reachable, unreachable };
+    return { devices, reachable, unreachable, insecure };
   }
 
   /**
@@ -154,16 +168,24 @@ export class HueManager {
       return [];
     }
 
-    const { devices, reachable, unreachable } = await this.buildDiscoveredDevices();
+    const { devices, reachable, unreachable, insecure } = await this.buildDiscoveredDevices();
 
     if (reachable === 0) {
       // Publishing an empty list here would wipe the Discovery tab because of a
       // transient network glitch. Keep the previous list and say what is wrong.
       logger.warn('No bridge reachable, keeping the previously published devices');
-      await this.gladys.setConnectionStatus(false, {
-        en: 'Hue bridge unreachable. Check that it is powered on and on the same network as Gladys.',
-        fr: "Bridge Hue injoignable. Vérifiez qu'il est allumé et sur le même réseau que Gladys.",
-      });
+      await this.gladys.setConnectionStatus(
+        false,
+        insecure > 0
+          ? {
+              en: 'This legacy Hue bridge only offers unencrypted HTTP. Enable the legacy HTTP fallback in Configuration to use it.',
+              fr: "Ce bridge Hue ancien ne propose que le HTTP non chiffré. Activez l'option HTTP hérité dans Configuration pour l'utiliser.",
+            }
+          : {
+              en: 'Hue bridge unreachable. Check that it is powered on and on the same network as Gladys.',
+              fr: "Bridge Hue injoignable. Vérifiez qu'il est allumé et sur le même réseau que Gladys.",
+            },
+      );
       return [];
     }
 
@@ -292,13 +314,17 @@ export class HueManager {
    *
    * The outcome is split per cause so the UI can tell the user what to actually
    * do next, instead of a single "it failed".
-   * @returns {Promise<{ paired: object[], pending: object[], unreachable: object[], notABridge: string[] }>} Result per bridge.
+   * @returns {Promise<{ paired: object[], pending: object[], unreachable: object[], insecure: object[], notABridge: string[] }>} Result per bridge.
    */
   async pairBridges() {
     const { bridges, ignored } = await this.identifiedBridges();
-    const result = { paired: [], pending: [], unreachable: [], notABridge: ignored };
+    const result = { paired: [], pending: [], unreachable: [], insecure: [], notABridge: ignored };
 
     for (const bridge of bridges) {
+      if (bridge.scheme !== 'https' && !this.config.allow_insecure_http) {
+        result.insecure.push(bridge);
+        continue;
+      }
       // Reuse what identification already learned: the scheme that answered and
       // the certificate pinned on the way.
       const client = new HueBridgeClient(bridge.ip, undefined, {

@@ -66,15 +66,18 @@ export function parseBridgeConfig(ip, body, scheme = 'http', certFingerprint) {
 /**
  * Prove that an address hosts a Philips Hue bridge.
  *
- * Tries plain HTTP first (the v1 API every bridge still serves), then HTTPS:
- * Signify is progressively blocking HTTP, and recent firmwares answer only on
- * TLS. Never throws — an unidentified candidate is simply not a bridge.
+ * Tries HTTPS first so capable bridges never get downgraded to clear-text HTTP,
+ * then probes HTTP for legacy bridges. Identification is unauthenticated;
+ * manager.js decides whether the user explicitly allowed pairing over HTTP.
+ * Never throws — an unidentified candidate is simply not a bridge.
  * @param {string} ip - Candidate address.
  * @param {string} [expectedBridgeId] - Bridge id announced by discovery, when available.
+ * @param {{ schemes?: string[] }} [options] - Transport override used by focused tests.
  * @returns {Promise<object | undefined>} Identity, or `undefined`.
  */
-export async function identifyBridge(ip, expectedBridgeId = '') {
-  for (const scheme of ['http', 'https']) {
+export async function identifyBridge(ip, expectedBridgeId = '', options = {}) {
+  const schemes = options.schemes || ['https', 'http'];
+  for (const scheme of schemes) {
     const client = new HueBridgeClient(ip, undefined, {
       scheme,
       id: expectedBridgeId || undefined,
@@ -115,11 +118,12 @@ export async function identifyBridge(ip, expectedBridgeId = '') {
  * Identify a list of candidate addresses, in parallel, keeping only the ones
  * that really are Hue bridges.
  * @param {Array<{ ip: string }>} candidates - Discovery candidates.
+ * @param {{ schemes?: string[] }} [options] - Transport override used by focused tests.
  * @returns {Promise<{ bridges: Array<object>, ignored: string[] }>} Proven bridges and rejected addresses.
  */
-export async function identifyBridges(candidates) {
+export async function identifyBridges(candidates, options = {}) {
   const usable = (candidates || []).filter((candidate) => candidate && candidate.ip);
-  const results = await Promise.all(usable.map((candidate) => identifyBridge(candidate.ip, candidate.id)));
+  const results = await Promise.all(usable.map((candidate) => identifyBridge(candidate.ip, candidate.id, options)));
 
   const bridges = [];
   const ignored = [];

@@ -23,6 +23,7 @@ export const POLL_FREQUENCIES = [10000, 15000, 30000, 60000];
 export const DEFAULT_CONFIG = {
   bridge_ip: '', // optional manual override when discovery fails
   bridge_ip_rejected: '', // set when the user typed an unusable address
+  allow_insecure_http: false, // legacy bridges only; credentials are otherwise sent in clear text
   poll_frequency: 60000, // one refresh per minute
 };
 
@@ -50,7 +51,7 @@ export function isValidBridgeHost(value) {
  * Merge the user config with the defaults and coerce types (the form sends
  * `select` values as strings).
  * @param {Record<string, unknown>} raw - config returned by the SDK.
- * @returns {{ bridge_ip: string, bridge_ip_rejected: string, poll_frequency: number }} Normalized config.
+ * @returns {{ bridge_ip: string, bridge_ip_rejected: string, allow_insecure_http: boolean, poll_frequency: number }} Normalized config.
  */
 export function normalizeConfig(raw = {}) {
   const pollFrequency = Number(raw.poll_frequency);
@@ -64,6 +65,7 @@ export function normalizeConfig(raw = {}) {
     // input is kept aside so the actions can tell the user WHY it was ignored.
     bridge_ip: bridgeIpValid ? bridgeIp : DEFAULT_CONFIG.bridge_ip,
     bridge_ip_rejected: bridgeIpValid ? '' : bridgeIp,
+    allow_insecure_http: raw.allow_insecure_http === true || String(raw.allow_insecure_http).toLowerCase() === 'true',
     // Only the values Gladys accepts; anything else falls back to the default.
     poll_frequency: POLL_FREQUENCIES.includes(pollFrequency) ? pollFrequency : DEFAULT_CONFIG.poll_frequency,
   };
