@@ -53,6 +53,8 @@ export class HueManager {
     this.pollSnapshots = new Map();
     /** @type {Map<string, Promise<void>>} */
     this.pollTasks = new Map();
+    /** @type {Promise<object> | undefined} */
+    this.pairingTask = undefined;
     /**
      * @type {Map<string, {
      *   platformId: string, hueId: string, bridgeIp: string,
@@ -362,13 +364,50 @@ export class HueManager {
    *
    * The outcome is split per cause so the UI can tell the user what to actually
    * do next, instead of a single "it failed".
-   * @returns {Promise<{ paired: object[], pending: object[], unreachable: object[], insecure: object[], notABridge: string[] }>} Result per bridge.
+   * @returns {Promise<{ paired: object[], alreadyPaired: object[], pending: object[], unreachable: object[], insecure: object[], notABridge: string[] }>} Result per bridge.
    */
   async pairBridges() {
+    if (this.pairingTask) {
+      return this.pairingTask;
+    }
+    const task = this.pairBridgesOnce().finally(() => {
+      if (this.pairingTask === task) {
+        this.pairingTask = undefined;
+      }
+    });
+    this.pairingTask = task;
+    return task;
+  }
+
+  /**
+   * Perform one pairing pass. Concurrent action clicks share this pass through
+   * pairBridges(), so the bridge never grants duplicate application keys.
+   * @returns {Promise<object>} Pairing result.
+   */
+  async pairBridgesOnce() {
     const { bridges, ignored } = await this.identifiedBridges();
-    const result = { paired: [], pending: [], unreachable: [], insecure: [], notABridge: ignored };
+    const result = {
+      paired: [],
+      alreadyPaired: [],
+      pending: [],
+      unreachable: [],
+      insecure: [],
+      notABridge: ignored,
+    };
 
     for (const bridge of bridges) {
+      const existing = this.store
+        .list()
+        .find((stored) => (bridge.id ? stored.id === bridge.id : stored.ip === bridge.ip));
+      if (existing) {
+        // Discovery may reveal a new DHCP address. Preserve the credential,
+        // scheme and certificate pin while updating only the routing address.
+        if (existing.ip !== bridge.ip) {
+          await this.store.upsert({ ...existing, ip: bridge.ip });
+        }
+        result.alreadyPaired.push(bridge);
+        continue;
+      }
       if (bridge.scheme !== 'https' && !this.config.allow_insecure_http) {
         result.insecure.push(bridge);
         continue;

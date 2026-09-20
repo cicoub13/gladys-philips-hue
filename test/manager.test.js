@@ -411,6 +411,45 @@ test('pairBridges blocks a legacy HTTP bridge unless the user opted in', async (
   assert.deepEqual(result.insecure, [IDENTIFIED_BRIDGE]);
 });
 
+test('pairBridges is idempotent for a bridge that already has credentials', async () => {
+  const { manager, store } = await makeManager();
+  const existing = store.list()[0];
+  manager.identifiedBridges = async () => ({
+    bridges: [{ ...IDENTIFIED_BRIDGE, id: existing.id, ip: '192.168.1.11' }],
+    ignored: [],
+  });
+  const fetchMock = mock.method(global, 'fetch', async () => {
+    throw new Error('an existing bridge must not be paired again');
+  });
+
+  const result = await manager.pairBridges();
+  assert.equal(fetchMock.mock.callCount(), 0);
+  assert.equal(result.paired.length, 0);
+  assert.equal(result.alreadyPaired.length, 1);
+  assert.equal(store.list()[0].username, existing.username);
+  assert.equal(store.list()[0].ip, '192.168.1.11', 'the DHCP address is refreshed without rotating the key');
+  mock.restoreAll();
+});
+
+test('concurrent pairing clicks share one bridge request', async () => {
+  const { manager, store } = await makeManager();
+  store.bridges.length = 0;
+  manager.config.allow_insecure_http = true;
+  manager.identifiedBridges = async () => ({ bridges: [IDENTIFIED_BRIDGE], ignored: [] });
+  let requests = 0;
+  mock.method(global, 'fetch', async () => {
+    requests += 1;
+    await new Promise((resolve) => setImmediate(resolve));
+    return new Response(JSON.stringify([{ success: { username: 'granted-key' } }]), { status: 200 });
+  });
+
+  const [first, second] = await Promise.all([manager.pairBridges(), manager.pairBridges()]);
+  assert.equal(requests, 1);
+  assert.strictEqual(first, second, 'both callers receive the shared pairing result');
+  assert.equal(store.list().length, 1);
+  mock.restoreAll();
+});
+
 test('pairBridges never tries to pair a device that is not a Hue bridge', async () => {
   // The reported bug: mDNS surfaced a printer and a NAS, and pairing POSTed
   // /api to both, surfacing "fetch failed" and "HTTP 404" to the user.

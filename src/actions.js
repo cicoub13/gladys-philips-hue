@@ -87,7 +87,7 @@ export async function discoverBridgesAction(manager) {
  * @returns {Promise<{ en: string, fr: string }>} Message shown under the button.
  */
 export async function pairBridgeAction(manager) {
-  const { paired, pending, unreachable, insecure = [], notABridge } = await manager.pairBridges();
+  const { paired, alreadyPaired = [], pending, unreachable, insecure = [], notABridge } = await manager.pairBridges();
 
   if (paired.length > 0) {
     const names = paired.map((bridge) => describeBridge(bridge)).join(', ');
@@ -100,9 +100,25 @@ export async function pairBridgeAction(manager) {
         fr: `Appairage réussi avec : ${names}, vos lampes sont dans l'onglet Découverte — mais les identifiants n'ont PAS pu être enregistrés (${manager.store.persistError.message}). Ils seront perdus au redémarrage de l'intégration. Vérifiez que le volume de données de l'intégration est accessible en écriture.`,
       };
     }
+    const existingSuffix =
+      alreadyPaired.length > 0
+        ? {
+            en: ` ${alreadyPaired.length} other bridge(s) were already paired.`,
+            fr: ` ${alreadyPaired.length} autre(s) bridge(s) étaient déjà appairé(s).`,
+          }
+        : { en: '', fr: '' };
     return {
-      en: `Paired successfully with: ${names}. Your lights are now available in the Discovery tab.`,
-      fr: `Appairage réussi avec : ${names}. Vos lampes sont maintenant disponibles dans l'onglet Découverte.`,
+      en: `Paired successfully with: ${names}. Your lights are now available in the Discovery tab.${existingSuffix.en}`,
+      fr: `Appairage réussi avec : ${names}. Vos lampes sont maintenant disponibles dans l'onglet Découverte.${existingSuffix.fr}`,
+    };
+  }
+
+  if (alreadyPaired.length > 0) {
+    const names = alreadyPaired.map((bridge) => describeBridge(bridge)).join(', ');
+    await manager.syncDevices();
+    return {
+      en: `Already paired with: ${names}. The existing bridge key was kept and your lights were refreshed.`,
+      fr: `Déjà appairé avec : ${names}. La clé existante du bridge a été conservée et vos lampes ont été actualisées.`,
     };
   }
 

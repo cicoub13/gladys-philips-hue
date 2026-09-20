@@ -102,7 +102,7 @@ test('discoverBridges tells the user their address was rejected, instead of igno
 });
 
 // An empty outcome of every kind, so each test only states what it exercises.
-const NO_PAIRING = { paired: [], pending: [], unreachable: [], insecure: [], notABridge: [] };
+const NO_PAIRING = { paired: [], alreadyPaired: [], pending: [], unreachable: [], insecure: [], notABridge: [] };
 
 test('pairBridge confirms a successful pairing and refreshes the devices', async () => {
   const manager = makeManager({ pairResult: { ...NO_PAIRING, paired: [HUE_BRIDGE] } });
@@ -110,6 +110,14 @@ test('pairBridge confirms a successful pairing and refreshes the devices', async
   assertBilingual(message);
   assert.match(message.en, /Paired successfully/);
   assert.equal(manager.synced, 1, 'the lights are published right away');
+});
+
+test('pairBridge keeps an existing credential instead of creating another', async () => {
+  const manager = makeManager({ pairResult: { ...NO_PAIRING, alreadyPaired: [HUE_BRIDGE] } });
+  const message = await pairBridgeAction(manager);
+  assertBilingual(message);
+  assert.match(message.en, /Already paired/);
+  assert.equal(manager.synced, 1);
 });
 
 test('pairBridge warns when the credentials could not be saved', async () => {
