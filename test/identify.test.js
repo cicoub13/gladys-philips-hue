@@ -26,7 +26,7 @@ function stubFetch(responder) {
  * @returns {object} Fake Response.
  */
 function jsonResponse(body) {
-  return { ok: true, status: 200, json: async () => body };
+  return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 }
 
 afterEach(() => mock.restoreAll());
@@ -124,4 +124,38 @@ test('identifyBridges tolerates an empty or malformed candidate list', async () 
   assert.deepEqual(await identifyBridges([]), { bridges: [], ignored: [] });
   assert.deepEqual(await identifyBridges(null), { bridges: [], ignored: [] });
   assert.deepEqual(await identifyBridges([null, { ip: '' }]), { bridges: [], ignored: [] });
+});
+
+test('identifyBridges deduplicates, validates and limits untrusted candidates', async () => {
+  const calls = [];
+  stubFetch((url) => {
+    calls.push(url);
+    return jsonResponse({ name: 'not Hue' });
+  });
+
+  const { ignored } = await identifyBridges(
+    [{ ip: '192.168.1.1' }, { ip: '192.168.1.1' }, { ip: 'not/a/host' }, { ip: '192.168.1.2' }, { ip: '192.168.1.3' }],
+    { schemes: ['http'], maxCandidates: 2 },
+  );
+
+  assert.equal(calls.length, 2, 'only unique, valid candidates inside the cap are probed');
+  assert.deepEqual(ignored.sort(), ['192.168.1.1', '192.168.1.2', '192.168.1.3'].sort());
+});
+
+test('identifyBridges caps concurrent probes', async () => {
+  let active = 0;
+  let peak = 0;
+  stubFetch(async () => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setImmediate(resolve));
+    active -= 1;
+    return jsonResponse({ name: 'not Hue' });
+  });
+
+  await identifyBridges(
+    Array.from({ length: 10 }, (_, index) => ({ ip: `192.168.1.${index + 1}` })),
+    { schemes: ['http'], concurrency: 3 },
+  );
+  assert.equal(peak, 3);
 });

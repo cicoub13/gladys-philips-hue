@@ -21,6 +21,7 @@
 // -----------------------------------------------------------------------------
 
 import { createLogger } from '@gladysassistant/integration-sdk';
+import { isValidBridgeHost } from '../config.js';
 import { HueBridgeClient } from './bridge.js';
 
 const logger = createLogger({ name: 'hue-identify' });
@@ -30,6 +31,8 @@ const logger = createLogger({ name: 'hue-identify' });
 // 20 s budget the manifest declares. A device that is not a bridge must not
 // hold the button hostage.
 const IDENTIFY_TIMEOUT_MS = 3500;
+const MAX_IDENTIFY_CANDIDATES = 32;
+const IDENTIFY_CONCURRENCY = 4;
 
 /**
  * Turn an `/api/config` body into a bridge identity, or `undefined` when the
@@ -118,15 +121,40 @@ export async function identifyBridge(ip, expectedBridgeId = '', options = {}) {
  * Identify a list of candidate addresses, in parallel, keeping only the ones
  * that really are Hue bridges.
  * @param {Array<{ ip: string }>} candidates - Discovery candidates.
- * @param {{ schemes?: string[] }} [options] - Transport override used by focused tests.
+ * @param {{ schemes?: string[], maxCandidates?: number, concurrency?: number }} [options] - Probe limits and test overrides.
  * @returns {Promise<{ bridges: Array<object>, ignored: string[] }>} Proven bridges and rejected addresses.
  */
 export async function identifyBridges(candidates, options = {}) {
-  const usable = (candidates || []).filter((candidate) => candidate && candidate.ip);
-  const results = await Promise.all(usable.map((candidate) => identifyBridge(candidate.ip, candidate.id, options)));
+  const maximum = Math.max(
+    1,
+    Math.min(Number(options.maxCandidates) || MAX_IDENTIFY_CANDIDATES, MAX_IDENTIFY_CANDIDATES),
+  );
+  const concurrency = Math.max(1, Math.min(Number(options.concurrency) || IDENTIFY_CONCURRENCY, IDENTIFY_CONCURRENCY));
+  const byIp = new Map();
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const ip = String((candidate && candidate.ip) || '').trim();
+    if (isValidBridgeHost(ip) && !byIp.has(ip)) {
+      byIp.set(ip, { ...candidate, ip });
+    }
+  }
+  const allUsable = [...byIp.values()];
+  const usable = allUsable.slice(0, maximum);
+  const results = new Array(usable.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < usable.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const candidate = usable[index];
+      results[index] = await identifyBridge(candidate.ip, candidate.id, options);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, usable.length) }, () => worker()));
 
   const bridges = [];
-  const ignored = [];
+  const ignored = allUsable.slice(maximum).map((candidate) => candidate.ip);
   results.forEach((identity, index) => {
     if (identity) {
       bridges.push(identity);

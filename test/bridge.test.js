@@ -6,7 +6,7 @@ const USERNAME = 'super-secret-username';
 
 /**
  * Replace global fetch with a queue of canned responses.
- * @param {Array<{ ok?: boolean, status?: number, body?: any, throws?: Error }>} responses - Queued answers.
+ * @param {Array<{ ok?: boolean, status?: number, body?: any, throws?: Error, contentLength?: number }>} responses - Queued answers.
  * @returns {{ calls: Array<{ url: string, options: object }> }} Recorded calls.
  */
 function mockFetch(responses) {
@@ -18,10 +18,31 @@ function mockFetch(responses) {
     if (next.throws) {
       throw next.throws;
     }
+    const payload = Buffer.from(JSON.stringify(next.body ?? null));
+    let consumed = false;
     return {
       ok: next.ok !== undefined ? next.ok : true,
       status: next.status || 200,
-      json: async () => next.body,
+      headers: {
+        get(name) {
+          return name === 'content-length' && next.contentLength !== undefined ? String(next.contentLength) : null;
+        },
+      },
+      body: {
+        getReader() {
+          return {
+            async read() {
+              if (consumed) {
+                return { done: true, value: undefined };
+              }
+              consumed = true;
+              return { done: false, value: payload };
+            },
+            async cancel() {},
+            releaseLock() {},
+          };
+        },
+      },
     };
   });
   return { calls };
@@ -103,6 +124,11 @@ test('a 404 is not retried either', async () => {
   const { calls } = mockFetch([{ ok: false, status: 404 }]);
   await assert.rejects(() => new HueBridgeClient('192.168.1.10', USERNAME).getLights());
   assert.equal(calls.length, 1);
+});
+
+test('an oversized bridge response is rejected before it is buffered', async () => {
+  mockFetch([{ body: {}, contentLength: 5 * 1024 * 1024 + 1 }]);
+  await assert.rejects(() => new HueBridgeClient('192.168.1.10', USERNAME).getLights(), /too large/);
 });
 
 test('createUser returns the username the bridge granted', async () => {

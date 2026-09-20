@@ -33,6 +33,7 @@ const REQUEST_TIMEOUT_MS = 8000;
 const DEFAULT_RETRIES = 1;
 const RETRY_DELAY_MS = 400;
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
 // Hue error type returned while the physical link button has NOT been pressed.
 export const HUE_LINK_BUTTON_NOT_PRESSED = 101;
@@ -57,6 +58,58 @@ export function findHueError(body) {
   const entries = Array.isArray(body) ? body : [body];
   const failed = entries.find((entry) => entry && entry.error);
   return failed ? failed.error : undefined;
+}
+
+/**
+ * Read and parse a Fetch response without allowing an untrusted LAN peer to
+ * buffer an arbitrary amount of data in the integration process.
+ * @param {Response | object} response - Fetch response.
+ * @param {string} host - Host used in safe error messages.
+ * @returns {Promise<any>} Parsed JSON body.
+ */
+async function readBoundedJson(response, host) {
+  const declaredLength = Number(response.headers && response.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
+    const error = new Error(`Response from ${host} is too large`);
+    error.retryable = false;
+    throw error;
+  }
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    const error = new Error(`Bridge ${host} returned an unreadable response body`);
+    error.retryable = false;
+    throw error;
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      const chunk = Buffer.from(value);
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        await reader.cancel();
+        const error = new Error(`Response from ${host} is too large`);
+        error.retryable = false;
+        throw error;
+      }
+      chunks.push(chunk);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      const invalidJson = new Error(`Bridge ${host} returned a non-JSON body`, { cause: error });
+      invalidJson.retryable = false;
+      throw invalidJson;
+    }
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /**
@@ -141,7 +194,7 @@ export class HueBridgeClient {
         error.httpStatus = response.status;
         throw error;
       }
-      return await response.json();
+      return await readBoundedJson(response, this.ip);
     } finally {
       clearTimeout(timeout);
     }
@@ -174,7 +227,8 @@ export class HueBridgeClient {
         }
         return body;
       } catch (error) {
-        const retryable = error.httpStatus === undefined || RETRYABLE_STATUS.has(error.httpStatus);
+        const retryable =
+          error.retryable !== false && (error.httpStatus === undefined || RETRYABLE_STATUS.has(error.httpStatus));
         if (error.hueErrorType !== undefined || !retryable || attempt === retries) {
           throw error;
         }
