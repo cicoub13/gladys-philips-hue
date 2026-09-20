@@ -29,6 +29,7 @@ const APP_NAME = 'gladys#philips-hue';
 
 // Every FEATURE kind we may have to dispatch a command to.
 const FEATURE_KINDS = [FEATURE.ON_OFF, FEATURE.BRIGHTNESS, FEATURE.COLOR, FEATURE.TEMPERATURE];
+const POLL_SNAPSHOT_MS = 1000;
 
 export const HUE_INSECURE_HTTP_DISABLED = 'HUE_INSECURE_HTTP_DISABLED';
 
@@ -42,6 +43,10 @@ export class HueManager {
     this.gladys = gladys;
     this.config = config;
     this.store = store;
+    /** @type {Map<string, { at: number, promise: Promise<Record<string, object>> }>} */
+    this.pollSnapshots = new Map();
+    /** @type {Map<string, Promise<void>>} */
+    this.pollTasks = new Map();
     /**
      * @type {Map<string, {
      *   platformId: string, hueId: string, bridgeIp: string,
@@ -274,8 +279,44 @@ export class HueManager {
    * @returns {Promise<void>} Resolves once states are published.
    */
   async poll(device) {
-    const { entry, client } = this.resolve(device);
-    const light = await client.getLight(entry.hueId);
+    const deviceId = device.external_id;
+    const inFlight = this.pollTasks.get(deviceId);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const task = this.pollOnce(device).finally(() => {
+      if (this.pollTasks.get(deviceId) === task) {
+        this.pollTasks.delete(deviceId);
+      }
+    });
+    this.pollTasks.set(deviceId, task);
+    return task;
+  }
+
+  /**
+   * Poll one light from a bridge-wide snapshot. Calls arriving for other lights
+   * during the same burst share the single `/lights` request.
+   * @param {object} device - Gladys device.
+   * @returns {Promise<void>} Resolves once states are published.
+   */
+  async pollOnce(device) {
+    const { entry, bridge, client } = this.resolve(device);
+    const bridgeKey = bridge.id || bridge.ip;
+    const cached = this.pollSnapshots.get(bridgeKey);
+    let snapshot;
+    if (cached && Date.now() - cached.at < POLL_SNAPSHOT_MS) {
+      snapshot = cached.promise;
+    } else {
+      snapshot = client.getLights();
+      this.pollSnapshots.set(bridgeKey, { at: Date.now(), promise: snapshot });
+    }
+
+    const lights = await snapshot;
+    const light = lights && lights[entry.hueId];
+    if (!light) {
+      throw new Error(`Light ${entry.hueId} disappeared from bridge ${bridge.ip}`);
+    }
     entry.light = light; // refresh cached capabilities/state
     const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
     await this.publishChangedStates(entry, hueStateToFeatureStates(ids, light));

@@ -43,11 +43,14 @@ function makeFakeClient() {
     light,
     lastSetState: null,
     down: false,
+    getLightsCalls: 0,
+    extraLights: {},
     async getLights() {
+      this.getLightsCalls += 1;
       if (this.down) {
         throw new Error('connect EHOSTUNREACH');
       }
-      return { 3: light };
+      return { 3: light, ...this.extraLights };
     },
     async getLight() {
       if (this.down) {
@@ -176,6 +179,34 @@ test('poll publishes again once a value really changed', async () => {
   assert.ok(gladys.recorded.states.length > afterFirstPoll);
 });
 
+test('poll coalesces a burst of lights into one bridge request', async () => {
+  const { manager, gladys, client } = await makeManager();
+  const firstId = await firstDeviceId(manager);
+  const firstEntry = manager.registry.get(firstId);
+  const secondLight = {
+    ...client.light,
+    name: 'Cuisine',
+    uniqueid: '00:17:88:01:bb',
+    state: { ...client.light.state },
+  };
+  client.extraLights[4] = secondLight;
+  const secondPlatformId = `b1-${secondLight.uniqueid}`;
+  const secondIds = gladys.externalIds('light', secondPlatformId);
+  manager.registry.set(secondIds.device, {
+    platformId: secondPlatformId,
+    hueId: '4',
+    bridgeIp: firstEntry.bridgeIp,
+    light: secondLight,
+    lastValues: new Map(),
+  });
+  const before = client.getLightsCalls;
+
+  await Promise.all([manager.poll({ external_id: firstId }), manager.poll({ external_id: secondIds.device })]);
+
+  assert.equal(client.getLightsCalls, before + 1, 'both lights share one /lights request');
+  assert.ok(gladys.recorded.states.some((state) => state.device_feature_external_id.startsWith(secondIds.device)));
+});
+
 test('resolve throws a helpful error for an unknown device', async () => {
   const { manager } = await makeManager();
   await manager.buildDiscoveredDevices();
@@ -297,11 +328,11 @@ test('pairBridges persists the credentials of a bridge whose button was pressed'
   manager.config.allow_insecure_http = true;
   store.bridges.length = 0;
   manager.identifiedBridges = async () => ({ bridges: [IDENTIFIED_BRIDGE], ignored: [] });
-  mock.method(global, 'fetch', async () => ({
-    ok: true,
-    status: 200,
-    json: async () => [{ success: { username: 'granted-key' } }],
-  }));
+  mock.method(
+    global,
+    'fetch',
+    async () => new Response(JSON.stringify([{ success: { username: 'granted-key' } }]), { status: 200 }),
+  );
 
   const result = await manager.pairBridges();
   assert.deepEqual(
@@ -322,7 +353,7 @@ test('pairBridges separates "button not pressed" from an unreachable bridge', as
   });
   mock.method(global, 'fetch', async (url) => {
     if (String(url).includes('192.168.1.42')) {
-      return { ok: true, status: 200, json: async () => [{ error: { type: 101, description: 'link button' } }] };
+      return new Response(JSON.stringify([{ error: { type: 101, description: 'link button' } }]), { status: 200 });
     }
     throw new Error('EHOSTUNREACH');
   });
