@@ -65,9 +65,14 @@ test('identifyBridge proves a bridge over plain HTTP', async () => {
     return jsonResponse(BRIDGE_CONFIG);
   });
 
-  const identity = await identifyBridge('192.168.1.42');
+  const identity = await identifyBridge('192.168.1.42', '001788fffe123456');
   assert.equal(identity.id, '001788fffe123456');
   assert.equal(identity.scheme, 'http');
+});
+
+test('identifyBridge rejects a bridge id that disagrees with discovery', async () => {
+  stubFetch(() => jsonResponse(BRIDGE_CONFIG));
+  assert.equal(await identifyBridge('192.168.1.42', 'some-other-bridge'), undefined);
 });
 
 test('identifyBridge rejects a device that answers but is not a bridge', async () => {

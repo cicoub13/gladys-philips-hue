@@ -21,6 +21,8 @@
 
 import http from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
+import tls from 'node:tls';
 import { createHash } from 'node:crypto';
 
 const DEFAULT_TIMEOUT_MS = 8000;
@@ -62,6 +64,10 @@ export function checkCertificate(certificate, options = {}) {
   const fingerprint = certificate && certificate.raw ? fingerprintOf(certificate.raw) : '';
   const pinned = normalizeFingerprint(options.pinnedFingerprint);
 
+  if (!fingerprint) {
+    return { trusted: false, fingerprint, reason: 'the peer did not provide a certificate' };
+  }
+
   if (pinned) {
     return fingerprint === pinned
       ? { trusted: true, fingerprint }
@@ -74,15 +80,90 @@ export function checkCertificate(certificate, options = {}) {
 
   const commonName = String((certificate && certificate.subject && certificate.subject.CN) || '').toLowerCase();
   const bridgeId = String(options.bridgeId || '').toLowerCase();
-  if (bridgeId && commonName && commonName !== bridgeId) {
-    return {
-      trusted: false,
-      fingerprint,
-      reason: `the certificate identifies "${commonName}" instead of bridge ${bridgeId}`,
-    };
+  if (bridgeId) {
+    if (!commonName) {
+      return { trusted: false, fingerprint, reason: `the certificate does not identify bridge ${bridgeId}` };
+    }
+    if (commonName !== bridgeId) {
+      return {
+        trusted: false,
+        fingerprint,
+        reason: `the certificate identifies "${commonName}" instead of bridge ${bridgeId}`,
+      };
+    }
   }
   // First contact: nothing to compare against yet, the caller pins what we return.
   return { trusted: true, fingerprint };
+}
+
+/**
+ * HTTPS agent that completes its connection callback only AFTER the peer
+ * certificate has been checked. Node does not assign the socket to the HTTP
+ * request before that callback, so no path, header or body can reach a peer
+ * whose certificate does not match the stored pin.
+ */
+class VerifiedHttpsAgent extends https.Agent {
+  /**
+   * @param {URL} target - Request target.
+   * @param {{ pinnedFingerprint?: string, bridgeId?: string, timeoutMs: number }} verification - Trust inputs.
+   */
+  constructor(target, verification) {
+    super({ keepAlive: false });
+    this.hostname = target.hostname;
+    this.port = Number(target.port) || 443;
+    this.verification = verification;
+    this.fingerprint = '';
+    this.commonName = '';
+  }
+
+  /**
+   * Establish and authenticate TLS before handing the socket to HTTPS.
+   * @param {object} _options - Connection options supplied by https.Agent.
+   * @param {(error: Error | null, socket?: import('node:tls').TLSSocket) => void} callback - Agent callback.
+   * @returns {undefined} The socket is deliberately delivered asynchronously.
+   */
+  createConnection(_options, callback) {
+    const socket = tls.connect({
+      host: this.hostname,
+      port: this.port,
+      // RFC 6066 forbids IP literals in SNI. Hue certificates identify the
+      // bridge id rather than its DHCP address anyway.
+      ...(net.isIP(this.hostname) ? {} : { servername: this.hostname }),
+      // Hue uses a private/self-signed PKI; checkCertificate is the trust root.
+      rejectUnauthorized: false,
+    });
+    let settled = false;
+
+    const finish = (error, verifiedSocket) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        socket.destroy();
+      }
+      callback(error || null, verifiedSocket);
+    };
+
+    const timer = setTimeout(() => {
+      finish(new Error(`Bridge ${this.hostname} did not complete TLS within ${this.verification.timeoutMs} ms`));
+    }, this.verification.timeoutMs);
+
+    socket.once('secureConnect', () => {
+      const certificate = socket.getPeerCertificate();
+      const verdict = checkCertificate(certificate, this.verification);
+      if (!verdict.trusted) {
+        finish(new Error(`Refused the TLS certificate of ${this.hostname}: ${verdict.reason}`));
+        return;
+      }
+      this.fingerprint = verdict.fingerprint;
+      this.commonName = String((certificate.subject && certificate.subject.CN) || '');
+      finish(undefined, socket);
+    });
+    socket.once('error', (error) => finish(error));
+    return undefined;
+  }
 }
 
 /**
@@ -100,6 +181,7 @@ export function requestJson(url, options = {}) {
   const target = new URL(url);
   const secure = target.protocol === 'https:';
   const transport = secure ? https : http;
+  const agent = secure ? new VerifiedHttpsAgent(target, { pinnedFingerprint, bridgeId, timeoutMs }) : undefined;
 
   return new Promise((resolve, reject) => {
     const request = transport.request(
@@ -107,21 +189,10 @@ export function requestJson(url, options = {}) {
       {
         method,
         headers: { 'Content-Type': 'application/json', ...headers },
-        // See the trust model above: we verify the certificate ourselves.
-        ...(secure ? { rejectUnauthorized: false, servername: target.hostname } : {}),
+        ...(secure ? { agent } : {}),
       },
       (response) => {
-        let fingerprint = '';
-        if (secure) {
-          const verdict = checkCertificate(response.socket.getPeerCertificate(), { pinnedFingerprint, bridgeId });
-          if (!verdict.trusted) {
-            response.destroy();
-            request.destroy();
-            reject(new Error(`Refused the TLS certificate of ${target.hostname}: ${verdict.reason}`));
-            return;
-          }
-          fingerprint = verdict.fingerprint;
-        }
+        const fingerprint = agent ? agent.fingerprint : '';
 
         const chunks = [];
         let size = 0;
@@ -148,6 +219,10 @@ export function requestJson(url, options = {}) {
             if (fingerprint && parsed && typeof parsed === 'object') {
               // Non-enumerable: it must never leak into a JSON.stringify of the body.
               Object.defineProperty(parsed, 'fingerprint', { value: fingerprint, enumerable: false });
+              Object.defineProperty(parsed, 'certificateCommonName', {
+                value: agent.commonName,
+                enumerable: false,
+              });
             }
             resolve(parsed);
           } catch {

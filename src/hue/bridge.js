@@ -77,6 +77,7 @@ export class HueBridgeClient {
     this.id = options.id;
     // Pinned on the first HTTPS contact, then enforced (see `./https.js`).
     this.certFingerprint = options.certFingerprint;
+    this.certificateCommonName = '';
     // Identification probes every discovery candidate and must stay snappy, so
     // it shortens this; normal traffic keeps the generous default.
     this.timeoutMs = options.timeoutMs || REQUEST_TIMEOUT_MS;
@@ -116,6 +117,9 @@ export class HueBridgeClient {
         // First contact: remember what we trusted so the caller can persist it.
         if (body && body.fingerprint && !this.certFingerprint) {
           this.certFingerprint = body.fingerprint;
+        }
+        if (body && body.certificateCommonName) {
+          this.certificateCommonName = body.certificateCommonName;
         }
         return body;
       } catch (error) {

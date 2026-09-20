@@ -70,17 +70,34 @@ export function parseBridgeConfig(ip, body, scheme = 'http', certFingerprint) {
  * Signify is progressively blocking HTTP, and recent firmwares answer only on
  * TLS. Never throws — an unidentified candidate is simply not a bridge.
  * @param {string} ip - Candidate address.
+ * @param {string} [expectedBridgeId] - Bridge id announced by discovery, when available.
  * @returns {Promise<object | undefined>} Identity, or `undefined`.
  */
-export async function identifyBridge(ip) {
+export async function identifyBridge(ip, expectedBridgeId = '') {
   for (const scheme of ['http', 'https']) {
-    const client = new HueBridgeClient(ip, undefined, { scheme, timeoutMs: IDENTIFY_TIMEOUT_MS });
+    const client = new HueBridgeClient(ip, undefined, {
+      scheme,
+      id: expectedBridgeId || undefined,
+      timeoutMs: IDENTIFY_TIMEOUT_MS,
+    });
     try {
       // No retry: a candidate that does not answer once is not worth a second
       // round, and there may be many of them.
       const body = await client.getConfig({ retries: 0 });
       const identity = parseBridgeConfig(ip, body, scheme, client.certFingerprint);
       if (identity) {
+        if (expectedBridgeId && identity.id !== expectedBridgeId.toLowerCase()) {
+          logger.warn(`${ip} claimed bridge id ${identity.id}, expected ${expectedBridgeId.toLowerCase()}`);
+          return undefined;
+        }
+        if (
+          scheme === 'https' &&
+          client.certificateCommonName &&
+          client.certificateCommonName.toLowerCase() !== identity.id
+        ) {
+          logger.warn(`${ip} returned bridge id ${identity.id}, but its certificate identifies another bridge`);
+          return undefined;
+        }
         logger.debug(`${ip} is a Hue bridge: ${identity.name} (${identity.model || 'unknown model'}) over ${scheme}`);
         return identity;
       }
@@ -102,7 +119,7 @@ export async function identifyBridge(ip) {
  */
 export async function identifyBridges(candidates) {
   const usable = (candidates || []).filter((candidate) => candidate && candidate.ip);
-  const results = await Promise.all(usable.map((candidate) => identifyBridge(candidate.ip)));
+  const results = await Promise.all(usable.map((candidate) => identifyBridge(candidate.ip, candidate.id)));
 
   const bridges = [];
   const ignored = [];
