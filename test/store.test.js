@@ -37,6 +37,24 @@ test('BridgeStore keeps distinct bridges apart', async () => {
   assert.equal(store.list().length, 2);
 });
 
+test('BridgeStore removes a bridge and persists the deletion', async () => {
+  const file = await tempFile();
+  const store = new BridgeStore(file);
+  await store.load();
+  await store.upsert({ id: 'b1', ip: '10.0.0.1', username: 'u1' });
+  await store.upsert({ id: 'b2', ip: '10.0.0.2', username: 'u2' });
+
+  assert.equal(await store.remove({ id: 'b1', ip: '10.0.0.1' }), true);
+  assert.equal(await store.remove({ id: 'missing', ip: '10.0.0.99' }), false);
+
+  const reopened = new BridgeStore(file);
+  await reopened.load();
+  assert.deepEqual(
+    reopened.list().map((bridge) => bridge.id),
+    ['b2'],
+  );
+});
+
 test('BridgeStore writes atomically, never leaving a truncated file', async () => {
   // A power cut mid-write used to leave an unparsable bridges.json, which reads
   // back as "nothing paired": the user had to press the link button again.

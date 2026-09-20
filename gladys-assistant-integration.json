@@ -139,6 +139,14 @@
         "fr": "Appairer le bridge (appuyez d'abord sur le bouton)"
       },
       "timeout_seconds": 20
+    },
+    {
+      "key": "unpair_bridges",
+      "label": {
+        "en": "Unpair all bridges and revoke access",
+        "fr": "Dissocier tous les bridges et révoquer l'accès"
+      },
+      "timeout_seconds": 30
     }
   ]
 }

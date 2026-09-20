@@ -55,6 +55,8 @@ export class HueManager {
     this.pollTasks = new Map();
     /** @type {Promise<object> | undefined} */
     this.pairingTask = undefined;
+    /** @type {Promise<object> | undefined} */
+    this.unpairingTask = undefined;
     /**
      * @type {Map<string, {
      *   platformId: string, hueId: string, bridgeIp: string,
@@ -172,8 +174,11 @@ export class HueManager {
    * and right after a successful pairing.
    * @returns {Promise<Array<object>>} The devices published (empty if none).
    */
-  async syncDevices() {
+  async syncDevices({ clearWhenEmpty = false } = {}) {
     if (this.store.list().length === 0) {
+      if (clearWhenEmpty) {
+        await this.gladys.publishDiscoveredDevices([]);
+      }
       await this.gladys.setConnectionStatus(false, {
         en: 'No Hue bridge paired yet. Use the "Discover bridges" and "Pair bridge" buttons above.',
         fr: 'Aucun bridge Hue appairé. Utilisez les boutons « Découvrir les bridges » et « Appairer le bridge » ci-dessus.',
@@ -367,6 +372,9 @@ export class HueManager {
    * @returns {Promise<{ paired: object[], alreadyPaired: object[], pending: object[], unreachable: object[], insecure: object[], notABridge: string[] }>} Result per bridge.
    */
   async pairBridges() {
+    if (this.unpairingTask) {
+      await this.unpairingTask;
+    }
     if (this.pairingTask) {
       return this.pairingTask;
     }
@@ -438,6 +446,70 @@ export class HueManager {
         }
       }
     }
+    return result;
+  }
+
+  /**
+   * Revoke and forget every stored bridge credential. Concurrent clicks share
+   * one pass, and an in-progress pairing is allowed to finish first so a newly
+   * granted key cannot escape revocation.
+   * @returns {Promise<{ revoked: object[], unreachable: object[], insecure: object[] }>} Result per bridge.
+   */
+  async unpairBridges() {
+    if (this.pairingTask) {
+      await this.pairingTask;
+    }
+    if (this.unpairingTask) {
+      return this.unpairingTask;
+    }
+    const task = this.unpairBridgesOnce().finally(() => {
+      if (this.unpairingTask === task) {
+        this.unpairingTask = undefined;
+      }
+    });
+    this.unpairingTask = task;
+    return task;
+  }
+
+  /**
+   * Perform one revocation pass. A credential is removed locally only after
+   * the bridge confirms deletion, or says that the key is already invalid.
+   * Network failures retain it so the user can retry instead of leaving an
+   * unknown live key behind.
+   * @returns {Promise<{ revoked: object[], unreachable: object[], insecure: object[] }>} Result per bridge.
+   */
+  async unpairBridgesOnce() {
+    const result = { revoked: [], unreachable: [], insecure: [] };
+
+    for (const bridge of [...this.store.list()]) {
+      try {
+        const client = this.clientFor(bridge);
+        await client.revokeUser();
+      } catch (error) {
+        // Hue error 1 means the stored key no longer authenticates. It grants
+        // no access, so keeping a dead secret locally would not improve safety.
+        if (error.hueErrorType !== 1) {
+          if (error.code === HUE_INSECURE_HTTP_DISABLED) {
+            result.insecure.push(bridge);
+          } else {
+            logger.warn(`Could not revoke credentials from bridge ${bridge.ip}: ${error.message}`);
+            result.unreachable.push(bridge);
+          }
+          continue;
+        }
+      }
+
+      await this.store.remove(bridge);
+      result.revoked.push(bridge);
+      for (const [deviceId, entry] of this.registry) {
+        if (entry.bridgeIp === bridge.ip) {
+          this.registry.delete(deviceId);
+          this.pollTasks.delete(deviceId);
+        }
+      }
+      this.pollSnapshots.delete(bridge.id || bridge.ip);
+    }
+
     return result;
   }
 }

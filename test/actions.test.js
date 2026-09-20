@@ -1,6 +1,6 @@
 import { test, mock, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { discoverBridgesAction, pairBridgeAction } from '../src/actions.js';
+import { discoverBridgesAction, pairBridgeAction, unpairBridgesAction } from '../src/actions.js';
 import { resetDiscoveryCache } from '../src/hue/discovery.js';
 import { normalizeConfig } from '../src/config.js';
 
@@ -9,11 +9,18 @@ import { normalizeConfig } from '../src/config.js';
  * @param {object} [options] - Stub options.
  * @param {object} [options.config] - Raw config to normalize.
  * @param {object} [options.pairResult] - Result of pairBridges.
+ * @param {object} [options.unpairResult] - Result of unpairBridges.
  * @param {object} [options.identified] - Result of identifiedBridges.
  * @param {Error} [options.persistError] - Store persistence failure.
  * @returns {object} Manager stub.
  */
-function makeManager({ config = {}, pairResult, identified = { bridges: [], ignored: [] }, persistError } = {}) {
+function makeManager({
+  config = {},
+  pairResult,
+  unpairResult,
+  identified = { bridges: [], ignored: [] },
+  persistError,
+} = {}) {
   return {
     config: normalizeConfig(config),
     synced: 0,
@@ -25,8 +32,12 @@ function makeManager({ config = {}, pairResult, identified = { bridges: [], igno
     async pairBridges() {
       return pairResult;
     },
-    async syncDevices() {
+    async unpairBridges() {
+      return unpairResult;
+    },
+    async syncDevices(options) {
       this.synced += 1;
+      this.syncOptions = options;
       return [];
     },
   };
@@ -182,4 +193,33 @@ test('pairBridge blames the rejected address when there is no candidate because 
     }),
   );
   assert.match(message.en, /not a valid IP address/);
+});
+
+const NO_UNPAIRING = { revoked: [], unreachable: [], insecure: [] };
+
+test('unpairBridges confirms remote revocation and clears discovered devices', async () => {
+  const manager = makeManager({ unpairResult: { ...NO_UNPAIRING, revoked: [HUE_BRIDGE] } });
+  const message = await unpairBridgesAction(manager);
+
+  assertBilingual(message);
+  assert.match(message.en, /revoked bridge access/);
+  assert.equal(manager.synced, 1);
+  assert.deepEqual(manager.syncOptions, { clearWhenEmpty: true });
+});
+
+test('unpairBridges keeps credentials when the bridge is unreachable', async () => {
+  const manager = makeManager({ unpairResult: { ...NO_UNPAIRING, unreachable: [HUE_BRIDGE] } });
+  const message = await unpairBridgesAction(manager);
+
+  assertBilingual(message);
+  assert.match(message.en, /local key was kept/);
+  assert.equal(manager.synced, 0);
+});
+
+test('unpairBridges explains how to revoke a legacy HTTP credential', async () => {
+  const manager = makeManager({ unpairResult: { ...NO_UNPAIRING, insecure: [HUE_BRIDGE] } });
+  const message = await unpairBridgesAction(manager);
+
+  assertBilingual(message);
+  assert.match(message.en, /legacy HTTP fallback/);
 });

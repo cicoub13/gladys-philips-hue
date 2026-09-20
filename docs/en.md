@@ -31,6 +31,11 @@ interval** (default: every minute).
 4. Within 30 seconds, click **Pair bridge**. On success, your lights appear in
    the **Discovery** tab, ready to be created as devices.
 
+To remove the integration, use **Unpair all bridges and revoke access** while
+the bridges are reachable. This revokes the application keys on the bridges
+before their local copies are deleted. An unreachable bridge is kept paired so
+you can restore connectivity and retry the revocation.
+
 HTTPS is required by default. If an older bridge only supports HTTP, update its
 firmware first. As a last resort, enable **Allow legacy unencrypted HTTP** in
 Configuration; another device on the LAN could then observe the pairing key and

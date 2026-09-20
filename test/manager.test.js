@@ -43,6 +43,7 @@ function makeFakeClient() {
     light,
     lastSetState: null,
     down: false,
+    revokeCalls: 0,
     getLightsCalls: 0,
     extraLights: {},
     async getLights() {
@@ -61,6 +62,13 @@ function makeFakeClient() {
     async setLightState(id, state) {
       this.lastSetState = { id, state };
       Object.assign(light.state, state);
+      return [{ success: true }];
+    },
+    async revokeUser() {
+      this.revokeCalls += 1;
+      if (this.down) {
+        throw new Error('connect EHOSTUNREACH');
+      }
       return [{ success: true }];
     },
   };
@@ -289,6 +297,15 @@ test('syncDevices reports the missing pairing when no bridge is stored', async (
   assert.match(gladys.recorded.connectionStatus.at(-1).message.en, /No Hue bridge paired/);
 });
 
+test('syncDevices can explicitly clear stale devices after unpairing', async () => {
+  const { manager, gladys, store } = await makeManager();
+  store.bridges.length = 0;
+
+  await manager.syncDevices({ clearWhenEmpty: true });
+
+  assert.deepEqual(gladys.recorded.discovered, []);
+});
+
 test('syncDevices reports when stored legacy HTTP credentials are disabled', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hue-http-disabled-'));
   const store = new BridgeStore(path.join(dir, 'bridges.json'));
@@ -448,6 +465,44 @@ test('concurrent pairing clicks share one bridge request', async () => {
   assert.strictEqual(first, second, 'both callers receive the shared pairing result');
   assert.equal(store.list().length, 1);
   mock.restoreAll();
+});
+
+test('unpairBridges revokes the key before removing its local copy', async () => {
+  const { manager, client, store } = await makeManager();
+  await firstDeviceId(manager);
+
+  const result = await manager.unpairBridges();
+
+  assert.equal(client.revokeCalls, 1);
+  assert.equal(result.revoked.length, 1);
+  assert.equal(store.list().length, 0);
+  assert.equal(manager.registry.size, 0);
+});
+
+test('unpairBridges retains the key when the bridge cannot revoke it', async () => {
+  const { manager, client, store } = await makeManager();
+  client.down = true;
+
+  const result = await manager.unpairBridges();
+
+  assert.equal(result.unreachable.length, 1);
+  assert.equal(result.revoked.length, 0);
+  assert.equal(store.list().length, 1, 'the key is retained so revocation can be retried');
+});
+
+test('concurrent unpair clicks share one revocation request', async () => {
+  const { manager, client, store } = await makeManager();
+  client.revokeUser = async () => {
+    client.revokeCalls += 1;
+    await new Promise((resolve) => setImmediate(resolve));
+    return [{ success: true }];
+  };
+
+  const [first, second] = await Promise.all([manager.unpairBridges(), manager.unpairBridges()]);
+
+  assert.strictEqual(first, second);
+  assert.equal(client.revokeCalls, 1);
+  assert.equal(store.list().length, 0);
 });
 
 test('pairBridges never tries to pair a device that is not a Hue bridge', async () => {

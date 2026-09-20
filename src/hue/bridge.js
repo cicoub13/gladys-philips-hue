@@ -266,6 +266,21 @@ export class HueBridgeClient {
   }
 
   /**
+   * Revoke this integration's API user from the bridge.
+   *
+   * Removing the local credential alone would leave a live application key on
+   * the bridge. Hue exposes the whitelist through the authenticated v1 config
+   * endpoint, so unpairing deletes the same username used to authenticate.
+   * @returns {Promise<any>} The bridge response.
+   */
+  async revokeUser() {
+    this.assertUsername();
+    return this.request(`/api/${this.username}/config/whitelist/${this.username}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /**
    * Read the unauthenticated bridge description (`bridgeid`, `modelid`,
    * `apiversion`...). Also the endpoint used to prove a device IS a bridge.
    * @returns {Promise<object>} The bridge configuration.

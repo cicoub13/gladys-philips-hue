@@ -32,6 +32,12 @@ Les états sont rafraîchis par interrogation à l'intervalle choisi dans
 4. Dans les 30 secondes, cliquez sur **Appairer le bridge**. En cas de succès,
    vos lampes apparaissent dans l'onglet **Découverte**, prêtes à être créées.
 
+Pour supprimer l'intégration, utilisez **Dissocier tous les bridges et révoquer
+l'accès** pendant que les bridges sont joignables. Les clés d'application sont
+ainsi révoquées sur les bridges avant la suppression de leurs copies locales.
+Un bridge injoignable reste appairé afin de pouvoir rétablir la connexion et
+réessayer la révocation.
+
 HTTPS est requis par défaut. Si un ancien bridge ne prend en charge que HTTP,
 mettez d'abord son micrologiciel à jour. En dernier recours, activez **Autoriser
 le HTTP non chiffré hérité** dans Configuration ; un autre appareil du réseau

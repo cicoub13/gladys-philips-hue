@@ -127,6 +127,34 @@ export class BridgeStore {
   }
 
   /**
+   * Remove a paired bridge from memory and persist the new list.
+   *
+   * The caller revokes the key on the bridge first. If persistence fails, the
+   * in-memory credential still disappears immediately and `persistError` makes
+   * the stale on-disk copy visible to the UI instead of reporting a false
+   * success.
+   * @param {{ id?: string, ip: string }} bridge - Bridge to remove.
+   * @returns {Promise<boolean>} Whether a matching bridge was removed.
+   */
+  async remove(bridge) {
+    const before = this.bridges.length;
+    this.bridges = this.bridges.filter(
+      (stored) => !((bridge.id && stored.id === bridge.id) || stored.ip === bridge.ip),
+    );
+    if (this.bridges.length === before) {
+      return false;
+    }
+    try {
+      await this.persist();
+      this.persistError = undefined;
+    } catch (error) {
+      this.persistError = error;
+      logger.error(`Could not remove the revoked bridge from ${this.file} (${error.message})`);
+    }
+    return true;
+  }
+
+  /**
    * @returns {Array<{ id: string, ip: string, username: string }>} Paired bridges.
    */
   list() {

@@ -152,10 +152,20 @@ test('createUser is never retried: it would leave an orphan user on the bridge',
   assert.equal(calls.length, 1);
 });
 
+test('revokeUser deletes the application key from the bridge whitelist', async () => {
+  const { calls } = mockFetch([{ body: [{ success: { [`/config/whitelist/${USERNAME}`]: 'deleted' } }] }]);
+  await new HueBridgeClient('192.168.1.10', USERNAME).revokeUser();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, `http://192.168.1.10/api/${USERNAME}/config/whitelist/${USERNAME}`);
+  assert.equal(calls[0].options.method, 'DELETE');
+});
+
 test('an unpaired bridge refuses to build a request', async () => {
   const client = new HueBridgeClient('192.168.1.10');
   await assert.rejects(() => client.getLights(), /not paired yet/);
   await assert.rejects(() => client.setLightState('3', { on: true }), /not paired yet/);
+  await assert.rejects(() => client.revokeUser(), /not paired yet/);
 });
 
 test('requests target the bridge over plain HTTP with a JSON content type', async () => {

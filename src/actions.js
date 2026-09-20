@@ -164,3 +164,54 @@ export async function pairBridgeAction(manager) {
     }
   );
 }
+
+/**
+ * "Unpair all bridges" button: revoke each application key on its bridge
+ * before deleting the local copy, then refresh Gladys' discovered devices.
+ * @param {import('./manager.js').HueManager} manager - The Hue manager.
+ * @returns {Promise<{ en: string, fr: string }>} Message shown under the button.
+ */
+export async function unpairBridgesAction(manager) {
+  const { revoked, unreachable, insecure } = await manager.unpairBridges();
+
+  if (revoked.length > 0) {
+    await manager.syncDevices({ clearWhenEmpty: true });
+    const names = revoked.map((bridge) => describeBridge(bridge)).join(', ');
+    if (manager.store.persistError) {
+      return {
+        en: `Revoked bridge access for: ${names}, but the local credential file could NOT be updated (${manager.store.persistError.message}). Remove the integration data file before restarting it.`,
+        fr: `Accès au bridge révoqué pour : ${names}, mais le fichier local d'identifiants n'a PAS pu être mis à jour (${manager.store.persistError.message}). Supprimez le fichier de données de l'intégration avant de la redémarrer.`,
+      };
+    }
+    const retrySuffix =
+      unreachable.length + insecure.length > 0
+        ? {
+            en: ` ${unreachable.length + insecure.length} other bridge(s) were kept because their keys could not be revoked; fix connectivity and try again.`,
+            fr: ` ${unreachable.length + insecure.length} autre(s) bridge(s) ont été conservé(s), car leurs clés n'ont pas pu être révoquées ; rétablissez la connexion puis réessayez.`,
+          }
+        : { en: '', fr: '' };
+    return {
+      en: `Unpaired and revoked bridge access for: ${names}.${retrySuffix.en}`,
+      fr: `Bridge(s) dissocié(s) et accès révoqué pour : ${names}.${retrySuffix.fr}`,
+    };
+  }
+
+  if (insecure.length > 0) {
+    return {
+      en: 'The stored key belongs to a legacy HTTP bridge. Enable the legacy HTTP fallback temporarily, then click unpair again so the key can be revoked safely.',
+      fr: "La clé enregistrée appartient à un bridge HTTP ancien. Activez temporairement l'option HTTP hérité, puis relancez la dissociation afin de révoquer la clé en toute sécurité.",
+    };
+  }
+
+  if (unreachable.length > 0) {
+    return {
+      en: 'No bridge was unpaired because it could not be reached. Its local key was kept so you can restore connectivity and revoke it safely.',
+      fr: "Aucun bridge n'a été dissocié, car il est injoignable. Sa clé locale a été conservée afin que vous puissiez rétablir la connexion et la révoquer en toute sécurité.",
+    };
+  }
+
+  return {
+    en: 'No Hue bridge is currently paired.',
+    fr: "Aucun bridge Hue n'est actuellement appairé.",
+  };
+}

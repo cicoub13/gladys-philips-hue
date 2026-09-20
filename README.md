@@ -64,7 +64,9 @@ npm start
 ## Configuration & pairing
 
 See [`docs/en.md`](./docs/en.md) / [`docs/fr.md`](./docs/fr.md): discover the
-bridge, press its link button, click **Pair bridge**.
+bridge, press its link button, click **Pair bridge**. The **Unpair all bridges
+and revoke access** action removes the application keys from the bridges before
+deleting their local copies.
 
 ## License
 

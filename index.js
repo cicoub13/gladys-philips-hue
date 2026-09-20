@@ -18,7 +18,7 @@
 import { GladysIntegration, logger } from '@gladysassistant/integration-sdk';
 import { normalizeConfig } from './src/config.js';
 import { HueManager } from './src/manager.js';
-import { discoverBridgesAction, pairBridgeAction } from './src/actions.js';
+import { discoverBridgesAction, pairBridgeAction, unpairBridgesAction } from './src/actions.js';
 
 const gladys = new GladysIntegration();
 
@@ -51,6 +51,11 @@ gladys.onAction('discover_bridges', () => {
 gladys.onAction('pair_bridge', () => {
   logger.info('Action pair_bridge');
   return pairBridgeAction(manager);
+});
+
+gladys.onAction('unpair_bridges', () => {
+  logger.info('Action unpair_bridges');
+  return unpairBridgesAction(manager);
 });
 
 // --- Configuration updated by the user ---------------------------------------
