@@ -44,7 +44,7 @@ locally via its HTTP API — no Hue cloud account required.
 ## Development
 
 ```bash
-npm install
+npm ci
 npm run lint
 npm run format:check
 npm test
@@ -60,6 +60,9 @@ GLADYS_INTEGRATION_SELECTOR=philips-hue \
 HUE_DATA_DIR=./data \
 npm start
 ```
+
+Keep `GLADYS_INTEGRATION_TOKEN` in the process environment or an ignored local
+`.env` file; never commit it to the repository.
 
 ## Configuration & pairing
 
