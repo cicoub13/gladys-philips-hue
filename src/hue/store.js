@@ -11,6 +11,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { createLogger } from '@gladysassistant/integration-sdk';
 
 const logger = createLogger({ name: 'hue-store' });
@@ -68,10 +69,29 @@ export class BridgeStore {
    * @returns {Promise<void>} Resolves once written.
    */
   async persist() {
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    const temporaryFile = `${this.file}.tmp`;
-    await fs.writeFile(temporaryFile, JSON.stringify({ bridges: this.bridges }, null, 2), 'utf8');
-    await fs.rename(temporaryFile, this.file);
+    const directory = path.dirname(this.file);
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    // mkdir's mode only applies at creation time. Tighten an existing bind mount
+    // too, otherwise other host users may be able to traverse the credential dir.
+    await fs.chmod(directory, 0o700);
+
+    // Unique + exclusive prevents concurrent saves (or a pre-created symlink)
+    // from redirecting the secret write to a predictable `.tmp` path.
+    const temporaryFile = path.join(directory, `.${path.basename(this.file)}.${process.pid}.${randomUUID()}.tmp`);
+    try {
+      await fs.writeFile(temporaryFile, JSON.stringify({ bridges: this.bridges }, null, 2), {
+        encoding: 'utf8',
+        mode: 0o600,
+        flag: 'wx',
+      });
+      await fs.rename(temporaryFile, this.file);
+      // rename preserves the temporary file's mode, but chmod also repairs a
+      // credential file written by an older release with broader permissions.
+      await fs.chmod(this.file, 0o600);
+    } catch (error) {
+      await fs.unlink(temporaryFile).catch(() => {});
+      throw error;
+    }
   }
 
   /**

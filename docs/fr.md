@@ -74,8 +74,9 @@ d'adresse IP (fixez-la dans votre box), puis relancez une découverte.
 ## Remarques
 
 - Les identifiants d'appairage (le _username_ du bridge) sont stockés dans le
-  volume de données de l'intégration (`/data`) et survivent aux redémarrages.
-  L'appairage n'est fait qu'une seule fois.
+  volume de données de l'intégration (`/data`) avec des permissions limitées au
+  propriétaire et survivent aux redémarrages. L'appairage n'est fait qu'une
+  seule fois.
 - Le pilotage de vos lampes est toujours **100 % local** : les commandes et les
   lectures d'état vont directement au bridge sur votre réseau. Seule l'étape de
   découverte de dernier recours ci-dessus peut contacter un serveur Philips, et

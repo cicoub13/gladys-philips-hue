@@ -47,8 +47,23 @@ test('BridgeStore writes atomically, never leaving a truncated file', async () =
 
   const written = await fs.readFile(file, 'utf8');
   assert.deepEqual(JSON.parse(written).bridges.length, 1);
-  // The temporary file is renamed, not left behind.
-  await assert.rejects(() => fs.access(`${file}.tmp`));
+  // The unique temporary file is renamed, not left behind.
+  const leftovers = (await fs.readdir(path.dirname(file))).filter((name) => name.endsWith('.tmp'));
+  assert.deepEqual(leftovers, []);
+});
+
+test('BridgeStore restricts credential file and directory permissions', async () => {
+  const file = await tempFile();
+  // Simulate a store created by an older version with default, broad modes.
+  await fs.writeFile(file, JSON.stringify({ bridges: [] }), { mode: 0o644 });
+  await fs.chmod(path.dirname(file), 0o755);
+
+  const store = new BridgeStore(file);
+  await store.load();
+  await store.upsert({ id: 'b1', ip: '10.0.0.1', username: 'secret' });
+
+  assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+  assert.equal((await fs.stat(path.dirname(file))).mode & 0o777, 0o700);
 });
 
 test('a store that cannot be written keeps the pairing alive and reports why', async () => {

@@ -72,7 +72,8 @@ again within the next 30 seconds.
 ## Notes
 
 - The pairing credentials (the bridge _username_) are stored in the integration
-  data volume (`/data`) and survive restarts. You only pair once.
+  data volume (`/data`) with owner-only permissions and survive restarts. You
+  only pair once.
 - Controlling your lights is always **100 % local**: commands and state reads go
   straight to the bridge over your LAN. Only the last-resort discovery step
   above may contact a Philips server, and only while you look for your bridge.
