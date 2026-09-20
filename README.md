@@ -43,6 +43,8 @@ locally via its HTTP API — no Hue cloud account required.
 
 ## Development
 
+Node.js 24 or newer is required, matching the CI and production container.
+
 ```bash
 npm ci
 npm run lint
