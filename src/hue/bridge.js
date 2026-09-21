@@ -21,7 +21,7 @@
 // -----------------------------------------------------------------------------
 
 import { createLogger } from '@gladysassistant/integration-sdk';
-import { requestJson } from './https.js';
+import { requestJson, MAX_BODY_BYTES } from './https.js';
 
 const logger = createLogger({ name: 'hue-bridge' });
 
@@ -33,7 +33,6 @@ const REQUEST_TIMEOUT_MS = 8000;
 const DEFAULT_RETRIES = 1;
 const RETRY_DELAY_MS = 400;
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
-const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
 // Hue error type returned while the physical link button has NOT been pressed.
 export const HUE_LINK_BUTTON_NOT_PRESSED = 101;

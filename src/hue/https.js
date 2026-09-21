@@ -28,8 +28,9 @@ import { createHash } from 'node:crypto';
 const DEFAULT_TIMEOUT_MS = 8000;
 
 // Bodies are small JSON documents; this only guards against a rogue endpoint
-// streaming megabytes at us.
-const MAX_BODY_BYTES = 5 * 1024 * 1024;
+// streaming megabytes at us. Shared with `./bridge.js`, which enforces the
+// same cap on the plain-HTTP path.
+export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
 /**
  * Normalize a certificate fingerprint for comparison.

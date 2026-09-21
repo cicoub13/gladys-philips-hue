@@ -81,6 +81,42 @@ export async function discoverBridgesAction(manager) {
 }
 
 /**
+ * Describe the bridges left over from a pairing pass that a `paired`/`alreadyPaired`
+ * message would otherwise silently drop — a second bridge still needs its link
+ * button, is unreachable, or was blocked as legacy HTTP, in the very same pass.
+ * @param {{ pending: object[], unreachable: object[], insecure: object[] }} outcome - Leftover bridges.
+ * @returns {{ en: string, fr: string }} Suffix to append to the main message (empty when nothing is left over).
+ */
+function leftoverBridgesSuffix({ pending, unreachable, insecure }) {
+  const parts = [];
+  if (pending.length > 0) {
+    parts.push({
+      en: `${pending.length} other bridge(s) still need their link button pressed within 30 seconds.`,
+      fr: `${pending.length} autre(s) bridge(s) attendent encore l'appui sur leur bouton, dans les 30 secondes.`,
+    });
+  }
+  if (unreachable.length > 0) {
+    parts.push({
+      en: `${unreachable.length} other bridge(s) could not be reached.`,
+      fr: `${unreachable.length} autre(s) bridge(s) n'ont pas pu être joint(s).`,
+    });
+  }
+  if (insecure.length > 0) {
+    parts.push({
+      en: `${insecure.length} other bridge(s) were blocked because they only offer legacy HTTP.`,
+      fr: `${insecure.length} autre(s) bridge(s) ont été bloqué(s) car ils ne proposent que du HTTP hérité.`,
+    });
+  }
+  if (parts.length === 0) {
+    return { en: '', fr: '' };
+  }
+  return {
+    en: ` ${parts.map((p) => p.en).join(' ')}`,
+    fr: ` ${parts.map((p) => p.fr).join(' ')}`,
+  };
+}
+
+/**
  * "Pair bridge" button: create a user on each candidate bridge (the physical
  * link button must have been pressed), then re-publish the discovered devices.
  * @param {import('./manager.js').HueManager} manager - The Hue manager.
@@ -88,11 +124,12 @@ export async function discoverBridgesAction(manager) {
  */
 export async function pairBridgeAction(manager) {
   const { paired, alreadyPaired = [], pending, unreachable, insecure = [], notABridge } = await manager.pairBridges();
+  const leftover = leftoverBridgesSuffix({ pending, unreachable, insecure });
 
   if (paired.length > 0) {
     const names = paired.map((bridge) => describeBridge(bridge)).join(', ');
     // New credentials available: refresh the device list right away.
-    await manager.syncDevices();
+    const sync = await manager.syncDevices();
     if (manager.store.persistError) {
       // The pairing worked, but the credentials could not be written to /data.
       return {
@@ -107,18 +144,30 @@ export async function pairBridgeAction(manager) {
             fr: ` ${alreadyPaired.length} autre(s) bridge(s) étaient déjà appairé(s).`,
           }
         : { en: '', fr: '' };
+    if (sync.reachable === 0) {
+      return {
+        en: `Paired with: ${names}, but the bridge could not be reached right after pairing to publish your lights. Click "Pair bridge" again to retry.${existingSuffix.en}${leftover.en}`,
+        fr: `Appairage réussi avec : ${names}, mais le bridge n'a pas pu être joint juste après l'appairage pour publier vos lampes. Cliquez à nouveau sur « Appairer le bridge » pour réessayer.${existingSuffix.fr}${leftover.fr}`,
+      };
+    }
     return {
-      en: `Paired successfully with: ${names}. Your lights are now available in the Discovery tab.${existingSuffix.en}`,
-      fr: `Appairage réussi avec : ${names}. Vos lampes sont maintenant disponibles dans l'onglet Découverte.${existingSuffix.fr}`,
+      en: `Paired successfully with: ${names}. Your lights are now available in the Discovery tab.${existingSuffix.en}${leftover.en}`,
+      fr: `Appairage réussi avec : ${names}. Vos lampes sont maintenant disponibles dans l'onglet Découverte.${existingSuffix.fr}${leftover.fr}`,
     };
   }
 
   if (alreadyPaired.length > 0) {
     const names = alreadyPaired.map((bridge) => describeBridge(bridge)).join(', ');
-    await manager.syncDevices();
+    const sync = await manager.syncDevices();
+    if (sync.reachable === 0) {
+      return {
+        en: `Already paired with: ${names}. The existing bridge key was kept, but the bridge could not be reached to refresh your lights. Check that it stays powered on and reachable from Gladys.${leftover.en}`,
+        fr: `Déjà appairé avec : ${names}. La clé existante du bridge a été conservée, mais le bridge n'a pas pu être joint pour actualiser vos lampes. Vérifiez qu'il reste allumé et joignable depuis Gladys.${leftover.fr}`,
+      };
+    }
     return {
-      en: `Already paired with: ${names}. The existing bridge key was kept and your lights were refreshed.`,
-      fr: `Déjà appairé avec : ${names}. La clé existante du bridge a été conservée et vos lampes ont été actualisées.`,
+      en: `Already paired with: ${names}. The existing bridge key was kept and your lights were refreshed.${leftover.en}`,
+      fr: `Déjà appairé avec : ${names}. La clé existante du bridge a été conservée et vos lampes ont été actualisées.${leftover.fr}`,
     };
   }
 
@@ -196,17 +245,23 @@ export async function unpairBridgesAction(manager) {
     };
   }
 
-  if (insecure.length > 0) {
+  if (insecure.length > 0 || unreachable.length > 0) {
+    const parts = [];
+    if (insecure.length > 0) {
+      parts.push({
+        en: 'The stored key belongs to a legacy HTTP bridge. Enable the legacy HTTP fallback temporarily, then click unpair again so the key can be revoked safely.',
+        fr: "La clé enregistrée appartient à un bridge HTTP ancien. Activez temporairement l'option HTTP hérité, puis relancez la dissociation afin de révoquer la clé en toute sécurité.",
+      });
+    }
+    if (unreachable.length > 0) {
+      parts.push({
+        en: 'No bridge was unpaired because it could not be reached. Its local key was kept so you can restore connectivity and revoke it safely.',
+        fr: "Aucun bridge n'a été dissocié, car il est injoignable. Sa clé locale a été conservée afin que vous puissiez rétablir la connexion et la révoquer en toute sécurité.",
+      });
+    }
     return {
-      en: 'The stored key belongs to a legacy HTTP bridge. Enable the legacy HTTP fallback temporarily, then click unpair again so the key can be revoked safely.',
-      fr: "La clé enregistrée appartient à un bridge HTTP ancien. Activez temporairement l'option HTTP hérité, puis relancez la dissociation afin de révoquer la clé en toute sécurité.",
-    };
-  }
-
-  if (unreachable.length > 0) {
-    return {
-      en: 'No bridge was unpaired because it could not be reached. Its local key was kept so you can restore connectivity and revoke it safely.',
-      fr: "Aucun bridge n'a été dissocié, car il est injoignable. Sa clé locale a été conservée afin que vous puissiez rétablir la connexion et la révoquer en toute sécurité.",
+      en: parts.map((p) => p.en).join(' '),
+      fr: parts.map((p) => p.fr).join(' '),
     };
   }
 

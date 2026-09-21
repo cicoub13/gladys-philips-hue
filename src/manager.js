@@ -172,7 +172,7 @@ export class HueManager {
    *
    * Single entry point used at startup, on reconnection, after a config change
    * and right after a successful pairing.
-   * @returns {Promise<Array<object>>} The devices published (empty if none).
+   * @returns {Promise<{ devices: Array<object>, reachable: number, unreachable: number, insecure: number }>} Sync result.
    */
   async syncDevices({ clearWhenEmpty = false } = {}) {
     if (this.store.list().length === 0) {
@@ -183,7 +183,7 @@ export class HueManager {
         en: 'No Hue bridge paired yet. Use the "Discover bridges" and "Pair bridge" buttons above.',
         fr: 'Aucun bridge Hue appairé. Utilisez les boutons « Découvrir les bridges » et « Appairer le bridge » ci-dessus.',
       });
-      return [];
+      return { devices: [], reachable: 0, unreachable: 0, insecure: 0 };
     }
 
     const { devices, reachable, unreachable, insecure } = await this.buildDiscoveredDevices();
@@ -204,7 +204,7 @@ export class HueManager {
               fr: "Bridge Hue injoignable. Vérifiez qu'il est allumé et sur le même réseau que Gladys.",
             },
       );
-      return [];
+      return { devices: [], reachable, unreachable, insecure };
     }
 
     await this.gladys.publishDiscoveredDevices(devices);
@@ -217,7 +217,7 @@ export class HueManager {
     } else {
       await this.gladys.setConnectionStatus(true);
     }
-    return devices;
+    return { devices, reachable, unreachable, insecure };
   }
 
   /**
@@ -339,12 +339,17 @@ export class HueManager {
   /**
    * Compute the candidate bridge IPs to pair with: discovered ones plus the
    * optional manual override from the config.
+   *
+   * When the manual address matches one already found by discovery, the
+   * discovered entry (with its real bridge id) is kept rather than replaced:
+   * overwriting it with an empty id would blind the TLS trust-on-first-use
+   * check in `./identify.js` for that address.
    * @returns {Promise<Array<{ id: string, ip: string }>>} Candidate bridges.
    */
   async candidateBridges() {
     const discovered = await discoverBridges(this.gladys);
     const byIp = new Map(discovered.map((b) => [b.ip, b]));
-    if (this.config.bridge_ip) {
+    if (this.config.bridge_ip && !byIp.has(this.config.bridge_ip)) {
       byIp.set(this.config.bridge_ip, { id: '', ip: this.config.bridge_ip });
     }
     return [...byIp.values()];
@@ -373,7 +378,9 @@ export class HueManager {
    */
   async pairBridges() {
     if (this.unpairingTask) {
-      await this.unpairingTask;
+      // Only waiting for completion here: the unpairing caller already holds
+      // (and handles) this task's own rejection, if any.
+      await this.unpairingTask.catch(() => undefined);
     }
     if (this.pairingTask) {
       return this.pairingTask;
@@ -457,7 +464,9 @@ export class HueManager {
    */
   async unpairBridges() {
     if (this.pairingTask) {
-      await this.pairingTask;
+      // Only waiting for completion here: the pairing caller already holds
+      // (and handles) this task's own rejection, if any.
+      await this.pairingTask.catch(() => undefined);
     }
     if (this.unpairingTask) {
       return this.unpairingTask;
@@ -476,29 +485,40 @@ export class HueManager {
    * the bridge confirms deletion, or says that the key is already invalid.
    * Network failures retain it so the user can retry instead of leaving an
    * unknown live key behind.
+   *
+   * The bridges are contacted concurrently: sequentially awaiting each one
+   * could exceed the manifest's 30s timeout for this action once a few of
+   * them are unreachable and each has to run its own retry/timeout budget.
    * @returns {Promise<{ revoked: object[], unreachable: object[], insecure: object[] }>} Result per bridge.
    */
   async unpairBridgesOnce() {
     const result = { revoked: [], unreachable: [], insecure: [] };
 
-    for (const bridge of [...this.store.list()]) {
-      try {
-        const client = this.clientFor(bridge);
-        await client.revokeUser();
-      } catch (error) {
-        // Hue error 1 means the stored key no longer authenticates. It grants
-        // no access, so keeping a dead secret locally would not improve safety.
-        if (error.hueErrorType !== 1) {
-          if (error.code === HUE_INSECURE_HTTP_DISABLED) {
-            result.insecure.push(bridge);
-          } else {
+    const outcomes = await Promise.all(
+      [...this.store.list()].map(async (bridge) => {
+        try {
+          const client = this.clientFor(bridge);
+          await client.revokeUser();
+        } catch (error) {
+          // Hue error 1 means the stored key no longer authenticates. It grants
+          // no access, so keeping a dead secret locally would not improve safety.
+          if (error.hueErrorType !== 1) {
+            if (error.code === HUE_INSECURE_HTTP_DISABLED) {
+              return { bridge, reason: 'insecure' };
+            }
             logger.warn(`Could not revoke credentials from bridge ${bridge.ip}: ${error.message}`);
-            result.unreachable.push(bridge);
+            return { bridge, reason: 'unreachable' };
           }
-          continue;
         }
-      }
+        return { bridge, reason: 'revoked' };
+      }),
+    );
 
+    for (const { bridge, reason } of outcomes) {
+      if (reason !== 'revoked') {
+        result[reason].push(bridge);
+        continue;
+      }
       await this.store.remove(bridge);
       result.revoked.push(bridge);
       for (const [deviceId, entry] of this.registry) {

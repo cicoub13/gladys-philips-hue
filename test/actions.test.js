@@ -12,6 +12,7 @@ import { normalizeConfig } from '../src/config.js';
  * @param {object} [options.unpairResult] - Result of unpairBridges.
  * @param {object} [options.identified] - Result of identifiedBridges.
  * @param {Error} [options.persistError] - Store persistence failure.
+ * @param {object} [options.syncResult] - Result of syncDevices.
  * @returns {object} Manager stub.
  */
 function makeManager({
@@ -20,6 +21,7 @@ function makeManager({
   unpairResult,
   identified = { bridges: [], ignored: [] },
   persistError,
+  syncResult = { devices: [], reachable: 1, unreachable: 0, insecure: 0 },
 } = {}) {
   return {
     config: normalizeConfig(config),
@@ -38,7 +40,7 @@ function makeManager({
     async syncDevices(options) {
       this.synced += 1;
       this.syncOptions = options;
-      return [];
+      return syncResult;
     },
   };
 }
@@ -128,7 +130,35 @@ test('pairBridge keeps an existing credential instead of creating another', asyn
   const message = await pairBridgeAction(manager);
   assertBilingual(message);
   assert.match(message.en, /Already paired/);
+  assert.match(message.en, /refreshed/);
   assert.equal(manager.synced, 1);
+});
+
+test('pairBridge does not claim the lights were refreshed when the already-paired bridge is unreachable', async () => {
+  // Regression guard: syncDevices() can fail (e.g. allow_insecure_http just
+  // got disabled) even though the bridge key itself is still valid.
+  const manager = makeManager({
+    pairResult: { ...NO_PAIRING, alreadyPaired: [HUE_BRIDGE] },
+    syncResult: { devices: [], reachable: 0, unreachable: 1, insecure: 0 },
+  });
+  const message = await pairBridgeAction(manager);
+  assertBilingual(message);
+  assert.match(message.en, /Already paired/);
+  assert.doesNotMatch(message.en, /your lights were refreshed/);
+  assert.match(message.en, /could not be reached/);
+});
+
+test('pairBridge mentions a second bridge still pending its link button', async () => {
+  // Regression guard: an already-paired bridge used to hide any other bridge
+  // found in the same pairing pass.
+  const secondBridge = { ...HUE_BRIDGE, ip: '192.168.1.43' };
+  const manager = makeManager({
+    pairResult: { ...NO_PAIRING, alreadyPaired: [HUE_BRIDGE], pending: [secondBridge] },
+  });
+  const message = await pairBridgeAction(manager);
+  assertBilingual(message);
+  assert.match(message.en, /Already paired/);
+  assert.match(message.en, /link button pressed/);
 });
 
 test('pairBridge warns when the credentials could not be saved', async () => {
@@ -222,4 +252,19 @@ test('unpairBridges explains how to revoke a legacy HTTP credential', async () =
 
   assertBilingual(message);
   assert.match(message.en, /legacy HTTP fallback/);
+});
+
+test('unpairBridges reports both an insecure and an unreachable bridge left behind', async () => {
+  // Regression guard: the insecure-bridge branch used to return before ever
+  // mentioning a second, genuinely offline bridge.
+  const insecureBridge = HUE_BRIDGE;
+  const offlineBridge = { ...HUE_BRIDGE, ip: '192.168.1.44' };
+  const manager = makeManager({
+    unpairResult: { ...NO_UNPAIRING, insecure: [insecureBridge], unreachable: [offlineBridge] },
+  });
+  const message = await unpairBridgesAction(manager);
+
+  assertBilingual(message);
+  assert.match(message.en, /legacy HTTP fallback/);
+  assert.match(message.en, /could not be reached/);
 });

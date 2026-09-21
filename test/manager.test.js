@@ -291,7 +291,7 @@ test('syncDevices does not wipe the published devices when every bridge is down'
 test('syncDevices reports the missing pairing when no bridge is stored', async () => {
   const { manager, gladys, store } = await makeManager();
   store.bridges.length = 0;
-  const devices = await manager.syncDevices();
+  const { devices } = await manager.syncDevices();
   assert.deepEqual(devices, []);
   assert.equal(gladys.recorded.connectionStatus.at(-1).connected, false);
   assert.match(gladys.recorded.connectionStatus.at(-1).message.en, /No Hue bridge paired/);
@@ -314,7 +314,7 @@ test('syncDevices reports when stored legacy HTTP credentials are disabled', asy
   const gladys = makeGladys();
   const manager = new HueManager(gladys, { ...DEFAULT_CONFIG }, store);
 
-  assert.deepEqual(await manager.syncDevices(), []);
+  assert.deepEqual((await manager.syncDevices()).devices, []);
   assert.equal(gladys.recorded.connectionStatus.at(-1).connected, false);
   assert.match(gladys.recorded.connectionStatus.at(-1).message.en, /legacy HTTP fallback/);
 });
@@ -357,7 +357,12 @@ test('candidateBridges does not duplicate a manual address already discovered', 
   ];
   resetDiscoveryCache();
 
-  assert.equal((await manager.candidateBridges()).length, 1);
+  const candidates = await manager.candidateBridges();
+  assert.equal(candidates.length, 1);
+  // Regression guard: overwriting this entry with the manual override's
+  // `{ id: '' }` would blind the certificate/bridge-id cross-check in
+  // ./hue/identify.js for an address discovery already identified.
+  assert.equal(candidates[0].id, 'abc', 'the discovered bridge id must survive the manual override');
 });
 
 // A bridge as `identifyBridge` returns it, once proven through /api/config.
@@ -490,6 +495,31 @@ test('unpairBridges retains the key when the bridge cannot revoke it', async () 
   assert.equal(store.list().length, 1, 'the key is retained so revocation can be retried');
 });
 
+test('unpairBridgesOnce revokes several bridges concurrently, not one after another', async () => {
+  // Regression guard: a sequential pass could exceed the manifest's 30s
+  // timeout for this action once a few bridges are unreachable.
+  const { manager, store } = await makeManager();
+  store.bridges.length = 0;
+  await store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-1' });
+  await store.upsert({ id: 'b2', ip: '192.168.1.11', username: 'user-2' });
+
+  let inFlight = 0;
+  let maxInFlight = 0;
+  manager.clientFor = () => ({
+    async revokeUser() {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setImmediate(resolve));
+      inFlight -= 1;
+      return [{ success: true }];
+    },
+  });
+
+  const result = await manager.unpairBridges();
+  assert.equal(result.revoked.length, 2);
+  assert.equal(maxInFlight, 2, 'both bridges must be contacted at the same time');
+});
+
 test('concurrent unpair clicks share one revocation request', async () => {
   const { manager, client, store } = await makeManager();
   client.revokeUser = async () => {
@@ -503,6 +533,33 @@ test('concurrent unpair clicks share one revocation request', async () => {
   assert.strictEqual(first, second);
   assert.equal(client.revokeCalls, 1);
   assert.equal(store.list().length, 0);
+});
+
+test('unpairBridges does not propagate a concurrent pairing failure', async () => {
+  // Regression guard: awaiting the other task's completion must not let its
+  // rejection escape as a raw, unhandled error instead of a friendly result.
+  const { manager } = await makeManager();
+  manager.pairingTask = Promise.reject(new Error('discovery exploded'));
+
+  const result = await manager.unpairBridges();
+  assert.equal(result.revoked.length, 1, 'unpairing still proceeds normally');
+});
+
+test('pairBridges does not propagate a concurrent unpairing failure', async () => {
+  const { manager, store } = await makeManager();
+  store.bridges.length = 0;
+  manager.config.allow_insecure_http = true;
+  manager.identifiedBridges = async () => ({ bridges: [IDENTIFIED_BRIDGE], ignored: [] });
+  manager.unpairingTask = Promise.reject(new Error('revocation exploded'));
+  mock.method(
+    global,
+    'fetch',
+    async () => new Response(JSON.stringify([{ success: { username: 'granted-key' } }]), { status: 200 }),
+  );
+
+  const result = await manager.pairBridges();
+  assert.equal(result.paired.length, 1, 'pairing still proceeds normally');
+  mock.restoreAll();
 });
 
 test('pairBridges never tries to pair a device that is not a Hue bridge', async () => {
