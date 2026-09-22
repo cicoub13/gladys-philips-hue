@@ -51,3 +51,10 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
+    # Digest and minor/patch refreshes only. A Node major is a deliberate move
+    # (odd majors are never LTS): it goes through the kit template, for every
+    # integration at once, not through one bot PR per repo.
+    ignore:
+      - dependency-name: 'node'
+        update-types:
+          - 'version-update:semver-major'
