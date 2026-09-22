@@ -1,38 +1,51 @@
 # -----------------------------------------------------------------------------
-# Quality gate: lint, formatting and unit tests.
+# Continuous integration: runs on every push, every pull request, and before
+# every release (called by release.yml).
 #
-# Runs on every push and pull request, and is called by the Release workflow
-# (workflow_call) so a release can never be cut with a red test suite.
+# MANAGED BY integration-kit — edit the template there, not this copy: the next
+# `sync.sh` run would overwrite a local change.
+#
+# Gates:
+#   1. Prettier  -> consistent formatting (no style debates in reviews);
+#   2. ESLint    -> catch real mistakes (undefined vars, dead code, ...);
+#   3. Tests     -> `node --test`, the built-in runner. When the repo defines a
+#                   `coverage` script, it runs instead, so its thresholds gate;
+#   4. npm audit -> production dependencies only;
+#   5. Image     -> the Dockerfile builds, checked here instead of at release
+#                   time when it is too late.
+#
+# Runs on Node 24, the version the Docker image ships with (see the Dockerfile),
+# so the check exercises the exact runtime the integration runs on.
 # -----------------------------------------------------------------------------
 name: CI
 
 on:
-  # Branch pushes are covered by `pull_request`; listening to both would run
-  # everything twice on every PR.
   push:
     branches:
       - main
   pull_request:
+  # Called by release.yml: no release is cut on a red suite.
   workflow_call:
 
-# Superseded runs are pointless: only the latest commit matters. Keyed on the
-# workflow too, so a push to main never cancels the CI gating a release.
+permissions:
+  contents: read
+
+# A new push to a PR cancels the run it supersedes; runs on main all complete.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   quality:
     runs-on: ubuntu-latest
-    # Belt and braces with `--test-timeout`: a hanging test must never hold a
-    # runner for hours.
     timeout-minutes: 10
+    name: Lint & test
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
@@ -40,11 +53,41 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Check formatting
+      - name: Check formatting (Prettier)
         run: npm run format:check
 
-      - name: Test
-        run: npm test
+      - name: Lint (ESLint)
+        run: npm run lint
+
+      - name: Run tests (with the coverage floor when the repo defines one)
+        run: |
+          if jq -e '.scripts.coverage' package.json > /dev/null; then
+            npm run coverage
+          else
+            npm test
+          fi
+
+      - name: Audit the production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    name: Build the image
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      # amd64 only and no push: this gate is about "does the Dockerfile still
+      # build", the multi-arch publish stays in build.yml.
+      - name: Build (amd64, no push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
