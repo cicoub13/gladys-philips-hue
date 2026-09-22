@@ -21,6 +21,12 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
+# The package managers only serve the install above: drop them from the runtime
+# image. Less attack surface, and their own bundled dependencies (npm's tar,
+# brace-expansion, ...) no longer fail the Trivy scan of code that never runs.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /opt/yarn-v* \
+  /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
+
 # Then the integration code.
 COPY index.js ./
 COPY src ./src
