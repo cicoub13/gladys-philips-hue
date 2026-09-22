@@ -3,14 +3,23 @@
 #
 # In GitHub: Actions -> Release -> "Run workflow" -> pick patch / minor / major.
 #
+# MANAGED BY integration-kit — edit the template there, not this copy: the next
+# `sync.sh` run would overwrite a local change.
+#
 # What it does, in one run:
-#   0. runs the CI quality gate (lint + format + tests) — a red suite stops here;
+#   0. runs the CI quality gate (ci.yml) — a red suite stops here;
 #   1. computes the next semver from `package.json` (npm version rules);
 #   2. writes it into `package.json`, `package-lock.json` AND the manifest
-#      (`gladys-assistant-integration.json`: both `version` and the
-#      `docker_image` tag, so the indexer and the image stay in lockstep);
+#      (`gladys-assistant-integration.json`: `version`, the root `docker_image`
+#      and every sub-container running this same image, so the indexer and
+#      the images stay in lockstep);
 #   3. commits the bump and pushes the `vX.Y.Z` tag;
-#   4. calls build.yml to publish the multi-arch image (`:X.Y.Z` + `:latest`).
+#   4. publishes a GitHub Release with auto-generated notes;
+#   5. calls build.yml to publish the multi-arch image (`:X.Y.Z` + `:latest`).
+#
+# Why call build.yml instead of relying on the tag push: a tag pushed with the
+# default GITHUB_TOKEN does NOT trigger other workflows, so we invoke the build
+# ourselves. No personal access token to create.
 # -----------------------------------------------------------------------------
 name: Release
 
@@ -31,24 +40,34 @@ jobs:
   # Quality gate first: no release is cut on a red test suite.
   ci:
     uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
 
   prepare:
     needs: ci
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # commit the version bump, push the tag, create the Release
     outputs:
       version: ${{ steps.bump.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
+
+      # Prettier is already a locked devDependency (package-lock.json); install
+      # it here so the bump step below runs the pinned copy instead of letting
+      # `npx` download an unlocked one from the registry inside a job that
+      # holds `contents: write`. --ignore-scripts: nothing here needs the
+      # package's own install hooks, only its binary.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
 
       - name: Bump version and update the manifest
         id: bump
@@ -56,22 +75,40 @@ jobs:
           RELEASE_TYPE: ${{ inputs.release-type }}
         run: |
           set -euo pipefail
+
+          # npm computes the next semver and writes it to package.json (and
+          # package-lock.json). --no-git-tag-version: we own the commit + tag
+          # below, so npm must not touch git.
           new_version="$(npm version "$RELEASE_TYPE" --no-git-tag-version | tail -n1)"
-          new_version="${new_version#v}"
-          image="ghcr.io/${GITHUB_REPOSITORY,,}:${new_version}"
+          new_version="${new_version#v}" # v1.2.0 -> 1.2.0
+
+          repo_image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          image="${repo_image}:${new_version}"
+
+          # Keep the manifest in lockstep: the version the indexer reads AND the
+          # image tag Gladys pulls must both point at this release. Sub-containers
+          # running this same image (e.g. a `receiver`) are bumped too, otherwise
+          # they would stay pinned to an older version at every release. Those
+          # running a third-party image are left alone.
           tmp="$(mktemp)"
-          jq --arg version "$new_version" --arg image "$image" \
-            '.version = $version | .docker_image = $image' \
+          jq --arg version "$new_version" --arg image "$image" --arg prefix "${repo_image}:" \
+            '.version = $version
+             | .docker_image = $image
+             | (.containers[]? | select((.docker_image | tostring) | startswith($prefix)) | .docker_image) = $image' \
             gladys-assistant-integration.json > "$tmp"
           mv "$tmp" gladys-assistant-integration.json
 
-          # jq re-indents the whole document in its own style, which does NOT
-          # match Prettier: without this, every release commits a manifest that
-          # fails the `format:check` gate of CI on main.
-          npx --yes prettier@3 --write gladys-assistant-integration.json
+          # jq reprints the whole file with its own style — it expands short
+          # arrays Prettier keeps on one line — so the release commit would
+          # otherwise leave `npm run format:check` failing on the next push.
+          ./node_modules/.bin/prettier --write gladys-assistant-integration.json
 
           echo "version=${new_version}" >> "$GITHUB_OUTPUT"
 
+      # Note: if the branch you release from is protected against direct pushes,
+      # GitHub rejects the push below (the default GITHUB_TOKEN cannot bypass
+      # branch protection). Allow GitHub Actions to bypass the rule, or release
+      # from an unprotected branch.
       - name: Commit, tag and push
         env:
           VERSION: ${{ steps.bump.outputs.version }}
@@ -79,12 +116,28 @@ jobs:
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add package.json package-lock.json gladys-assistant-integration.json
           git commit -m "chore(release): ${VERSION}"
           git tag -a "v${VERSION}" -m "Release ${VERSION}"
+
           git push origin "HEAD:${GITHUB_REF_NAME}"
           git push origin "v${VERSION}"
 
+      # The tag alone is not discoverable: publish a GitHub Release so users and
+      # the store see what changed between two versions.
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --generate-notes \
+            --verify-tag
+
+  # Build and publish the image for the version we just tagged.
   build:
     needs: prepare
     uses: ./.github/workflows/build.yml

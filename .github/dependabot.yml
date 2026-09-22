@@ -1,0 +1,53 @@
+# -----------------------------------------------------------------------------
+# Keeps every pinned reference in this repo current: the GitHub Actions SHA
+# pins (.github/workflows/*.yml), the npm dependencies, and the Docker base
+# image digest (Dockerfile) — pinning without an updater just freezes today's
+# versions, bugs and all.
+#
+# MANAGED BY integration-kit — edit the template there, not this copy: the next
+# `sync.sh` run would overwrite a local change.
+# -----------------------------------------------------------------------------
+version: 2
+updates:
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    # Supply-chain guard: skip a release until it has been public for a few
+    # days, long enough for a hijacked version to be spotted and yanked.
+    # Security updates ignore this delay.
+    cooldown:
+      default-days: 3
+    groups:
+      # The SDK is still 0.x: every minor can break the integration. It always
+      # gets a PR of its own, to be read against the SDK changelog before
+      # merging — never mixed with routine bumps.
+      gladys-sdk:
+        patterns:
+          - '@gladysassistant/integration-sdk'
+      dev-dependencies:
+        dependency-type: 'development'
+        update-types:
+          - 'minor'
+          - 'patch'
+      prod-minor-patch:
+        dependency-type: 'production'
+        exclude-patterns:
+          - '@gladysassistant/integration-sdk'
+        update-types:
+          - 'minor'
+          - 'patch'
+
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+
+  - package-ecosystem: 'docker'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
