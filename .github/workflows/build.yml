@@ -15,6 +15,9 @@
 # That is ALL it takes to "publish": tag, push, and the decentralized indexer
 # does the rest (no review, no account to create).
 #
+# The vulnerability scan is NOT here but in ci.yml, which release.yml runs
+# first: a scan after the push would only report on an image already public.
+#
 # MANAGED BY integration-kit — edit the template there, not this copy: the next
 # `sync.sh` run would overwrite a local change.
 # -----------------------------------------------------------------------------
@@ -111,17 +114,6 @@ jobs:
           provenance: mode=max
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
-
-      # Fails the run on a fixable HIGH/CRITICAL vulnerability in the image just
-      # pushed (base image or production dependencies).
-      - name: Scan the published image
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ steps.meta.outputs.image_ref }}
-          format: table
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: 1
 
       - name: Docker build summary
         env:
