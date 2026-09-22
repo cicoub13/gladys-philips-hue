@@ -11,8 +11,8 @@
 #   3. Tests     -> `node --test`, the built-in runner. When the repo defines a
 #                   `coverage` script, it runs instead, so its thresholds gate;
 #   4. npm audit -> production dependencies only;
-#   5. Image     -> the Dockerfile builds, checked here instead of at release
-#                   time when it is too late.
+#   5. Image     -> the Dockerfile builds and its image passes a Trivy scan,
+#                   checked here instead of after the image is published.
 #
 # Runs on Node 24, the version the Docker image ships with (see the Dockerfile),
 # so the check exercises the exact runtime the integration runs on.
@@ -82,12 +82,28 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # amd64 only and no push: this gate is about "does the Dockerfile still
-      # build", the multi-arch publish stays in build.yml.
+      # build, and is it clean", the multi-arch publish stays in build.yml.
+      # Loaded into the local Docker daemon for the scan below.
       - name: Build (amd64, no push)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64
           push: false
+          load: true
+          tags: ci-image:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Fails on a fixable HIGH/CRITICAL vulnerability in the image (base image
+      # or production dependencies). Runs here, before anything is published:
+      # release.yml calls this workflow before it tags, so a vulnerable image
+      # never ships.
+      - name: Scan the image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ci-image:${{ github.sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
