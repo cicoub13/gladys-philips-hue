@@ -25,6 +25,15 @@ updates:
       gladys-sdk:
         patterns:
           - '@gladysassistant/integration-sdk'
+      # ESLint and its config packages move together: a major of one alone
+      # (e.g. @eslint/js 10 on eslint 9) leaves the others behind and has to be
+      # hand-assembled into one PR anyway. Every update type, majors included.
+      eslint:
+        patterns:
+          - 'eslint'
+          - '@eslint/*'
+          - 'eslint-config-*'
+          - 'globals'
       dev-dependencies:
         dependency-type: 'development'
         update-types:
