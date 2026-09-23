@@ -525,3 +525,164 @@ test('a command the bridge refuses does not mark the bridge unreachable', async 
   assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true);
   assert.equal(manager.resyncTimer, undefined);
 });
+
+/**
+ * Give a fake client one room with two scenes, both setting its light 3.
+ * @param {object} client - Fake bridge client.
+ * @returns {object} The same client, recording the recalled scenes.
+ */
+function withScenes(client) {
+  client.recalled = [];
+  client.getGroups = async () => ({ 1: { name: 'Salon', type: 'Room' } });
+  client.getScenes = async () => ({
+    s1: { name: 'Détente', type: 'GroupScene', group: '1', lights: ['3'] },
+    s2: { name: 'Lecture', type: 'GroupScene', group: '1', lights: ['3'] },
+  });
+  client.recallScene = async (groupId, sceneId) => {
+    client.recalled.push({ groupId, sceneId });
+    Object.assign(client.light.state, { on: true, bri: 254 });
+    return [{ success: true }];
+  };
+  return client;
+}
+
+test('activateScene recalls the named scene on its room', async () => {
+  const { manager, client } = await makeManager();
+  withScenes(client);
+  await manager.activateScene({ scene: 'détente', room: 'Salon' });
+  assert.deepEqual(client.recalled, [{ groupId: '1', sceneId: 's1' }]);
+});
+
+test('activateScene refreshes the lights of the scene right away', async () => {
+  const { manager, gladys, client } = await makeManager();
+  withScenes(client);
+  await manager.syncDevices();
+  let reads = 0;
+  const getLights = client.getLights;
+  client.getLights = async function () {
+    reads += 1;
+    return getLights.call(this);
+  };
+  await manager.activateScene({ scene: 'Détente' });
+  await new Promise(setImmediate); // the refresh runs after the ack
+  const onOff = gladys.recorded.states.find((s) => s.device_feature_external_id === `${SALON_ID}:on-off`);
+  assert.equal(onOff.state, 1);
+  assert.equal(reads, 1, 'one read of the bridge, not one per light');
+});
+
+test('activateScene still succeeds when the refresh after it fails', async () => {
+  const { manager, client } = await makeManager();
+  withScenes(client);
+  await manager.syncDevices();
+  client.getLights = async () => {
+    throw new Error('connect EHOSTUNREACH');
+  };
+  await manager.activateScene({ scene: 'Détente' });
+  await new Promise(setImmediate);
+  assert.equal(client.recalled.length, 1);
+  manager.stop();
+});
+
+test('activateScene does not wait for the refresh before answering', async () => {
+  const { manager, client } = await makeManager();
+  withScenes(client);
+  await manager.syncDevices();
+  client.getLights = () => new Promise(() => {}); // a bridge busy with the transition
+  await manager.activateScene({ scene: 'Détente' });
+  assert.equal(client.recalled.length, 1);
+});
+
+test('activateScene reads every bridge at once', async () => {
+  const { manager, client, store } = await makeManager();
+  withScenes(client);
+  await store.upsert({ id: 'b2', ip: '192.168.1.20', username: 'user-2' });
+  const started = [];
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const slow = withScenes(makeFakeClient());
+  slow.getScenes = async () => {
+    started.push('192.168.1.20');
+    await gate;
+    return {};
+  };
+  const getScenes = client.getScenes;
+  client.getScenes = async () => {
+    started.push('192.168.1.10');
+    await gate;
+    return getScenes();
+  };
+  manager.clientFor = (bridge) => (bridge.ip === '192.168.1.20' ? slow : client);
+
+  const done = manager.activateScene({ scene: 'Lecture' });
+  await new Promise(setImmediate);
+  assert.deepEqual(started.sort(), ['192.168.1.10', '192.168.1.20']);
+  release();
+  await done;
+  assert.deepEqual(client.recalled, [{ groupId: '1', sceneId: 's2' }]);
+});
+
+test('activateScene gives the real reason of a bridge that answered with an error', async () => {
+  const { manager, client, store } = await makeManager();
+  withScenes(client);
+  await store.upsert({ id: 'b2', ip: '192.168.1.20', username: 'user-2' });
+  const refusing = makeFakeClient();
+  refusing.getGroups = async () => {
+    const error = new Error('Bridge 192.168.1.20 refused /api/***/groups: unauthorized user');
+    error.hueErrorType = 1;
+    throw error;
+  };
+  refusing.getScenes = async () => ({});
+  manager.clientFor = (bridge) => (bridge.ip === '192.168.1.20' ? refusing : client);
+
+  await assert.rejects(
+    () => manager.activateScene({ scene: 'Cinéma' }),
+    (error) => /unauthorized user\)$/.test(error.message) && !/unreachable/.test(error.message),
+  );
+});
+
+test('activateScene fails with the available scenes when the name is unknown', async () => {
+  const { manager, client } = await makeManager();
+  withScenes(client);
+  await assert.rejects(() => manager.activateScene({ scene: 'Cinéma' }), /Available scenes: Détente, Lecture/);
+  assert.equal(client.recalled.length, 0);
+});
+
+test('activateScene fails when no bridge is paired', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hue-mgr-'));
+  const store = new BridgeStore(path.join(dir, 'bridges.json'));
+  await store.load();
+  const manager = new HueManager(makeGladys(), { ...DEFAULT_CONFIG }, store);
+  await assert.rejects(() => manager.activateScene({ scene: 'Détente' }), /No Hue bridge paired yet/);
+});
+
+test('activateScene finds the scene on the bridge that answers, and names the one that does not', async () => {
+  const { manager, client, store } = await makeManager();
+  withScenes(client);
+  await store.upsert({ id: 'b2', ip: '192.168.1.20', username: 'user-2' });
+  const down = makeFakeClient();
+  down.down = true;
+  down.getGroups = down.getLights;
+  down.getScenes = down.getLights;
+  manager.clientFor = (bridge) => (bridge.ip === '192.168.1.20' ? down : client);
+
+  await manager.activateScene({ scene: 'Lecture' });
+  assert.deepEqual(client.recalled, [{ groupId: '1', sceneId: 's2' }]);
+  await assert.rejects(
+    () => manager.activateScene({ scene: 'Cinéma' }),
+    /not found.*\(Hue bridge 192\.168\.1\.20 unreachable\)$/,
+  );
+  manager.stop();
+});
+
+test('activateScene fails the action when the bridge refuses the scene', async () => {
+  const { manager, client } = await makeManager();
+  withScenes(client);
+  client.recallScene = async () => {
+    const error = new Error('Bridge refused: resource not available');
+    error.hueErrorType = 3;
+    throw error;
+  };
+  await assert.rejects(() => manager.activateScene({ scene: 'Détente' }), /resource not available/);
+});

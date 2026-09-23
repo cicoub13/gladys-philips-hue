@@ -18,6 +18,23 @@ Each Hue light is exposed as a Gladys device with the features it supports:
 States are refreshed by polling at the interval you choose in **Refresh
 interval** (default: every minute).
 
+## Hue scenes in Gladys scenes
+
+> **Requires Gladys 5.1 or later.**
+
+The **Activate a Hue scene** action of the Gladys scene editor recalls a scene
+created in the Hue app: all its lights take their color and brightness at once,
+with the bridge's transition.
+
+- **Scene**: the name shown in the Hue app, for example `Relax`. Case and
+  surrounding spaces are ignored.
+- **Room or zone** (optional): only needed when several rooms have a scene with
+  that name, for example `Living room`.
+
+When the name matches no scene, or several, the action fails and the scene logs
+list the scenes (or the rooms) available. The rest of the Gladys scene keeps
+running.
+
 ## Setup
 
 1. Make sure your Hue bridge is powered on and connected to the same local

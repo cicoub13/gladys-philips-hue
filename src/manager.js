@@ -18,6 +18,7 @@ import { discoverBridges } from './hue/discovery.js';
 import { identifyBridges, parseBridgeConfig } from './hue/identify.js';
 import { BridgeStore } from './hue/store.js';
 import { FEATURE, featureValueToHueState, hueStateToFeatureStates, lightToDevicePayload } from './hue/mapping.js';
+import { findScene, listSceneCandidates } from './hue/scenes.js';
 
 const logger = createLogger({ name: 'hue-manager' });
 
@@ -479,6 +480,92 @@ export class HueManager {
     entry.light = light; // refresh cached capabilities/state
     const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
     await this.publishChangedStates(entry, hueStateToFeatureStates(ids, light));
+  }
+
+  /**
+   * Recall a Hue scene by name (the `activate_scene` scene action), then
+   * refresh the lights it set so Gladys shows them without waiting for the
+   * next poll.
+   * @param {{ scene?: string, room?: string }} fields - Resolved fields of the scene action.
+   * @returns {Promise<void>} Resolves once the bridge accepted the scene.
+   * @throws {Error} When no scene, or more than one, matches, or the bridge refuses.
+   */
+  async activateScene({ scene, room } = {}) {
+    const bridges = this.store.list();
+    if (bridges.length === 0) {
+      throw new Error('No Hue bridge paired yet: pair one from the Configuration screen');
+    }
+
+    // In parallel: a hung bridge must not eat the action's timeout before the
+    // others are even asked.
+    const results = await Promise.allSettled(
+      bridges.map((bridge) => {
+        const client = this.clientFor(bridge);
+        return this.callBridge(bridge.ip, () => Promise.all([client.getGroups(), client.getScenes()]));
+      }),
+    );
+    const candidates = [];
+    const failures = [];
+    results.forEach((result, index) => {
+      const { ip } = bridges[index];
+      if (result.status === 'fulfilled') {
+        const [groups, scenes] = result.value;
+        candidates.push(...listSceneCandidates(ip, groups, scenes));
+        return;
+      }
+      const { reason } = result;
+      logger.warn(`Could not read the scenes of bridge ${ip}: ${reason.message}`);
+      failures.push(isUnreachable(reason) ? `Hue bridge ${ip} unreachable` : reason.message);
+    });
+
+    let match;
+    try {
+      match = findScene(candidates, scene, room);
+    } catch (error) {
+      // The scene may well be on the bridge that did not answer.
+      if (failures.length > 0) {
+        error.message += ` (${failures.join('; ')})`;
+      }
+      throw error;
+    }
+
+    const client = this.clientFor(bridges.find((b) => b.ip === match.bridgeIp));
+    logger.info(`Recalling Hue scene "${match.sceneName}" (${match.roomName || 'all lights'}) on ${match.bridgeIp}`);
+    await this.callBridge(match.bridgeIp, () => client.recallScene(match.groupId, match.sceneId));
+    // Not awaited: the scene is on, a slow refresh must not delay the ack past
+    // the action's timeout and turn it into a failure.
+    this.refreshLights(match.bridgeIp, client, match.lights);
+  }
+
+  /**
+   * Publish the new state of the known lights among the given ones, from ONE
+   * read of the bridge (not one per light, which would burst its rate limit).
+   * Best-effort, never rejects: the command it follows already succeeded.
+   * @param {string} bridgeIp - Bridge the lights belong to.
+   * @param {HueBridgeClient} client - Client of that bridge.
+   * @param {string[]} hueIds - Hue ids of the lights.
+   * @returns {Promise<void>} Resolves once the states are published.
+   */
+  async refreshLights(bridgeIp, client, hueIds) {
+    const entries = [...this.registry.values()].filter(
+      (entry) => entry.bridgeIp === bridgeIp && hueIds.includes(entry.hueId),
+    );
+    if (entries.length === 0) {
+      return;
+    }
+    try {
+      const lights = await this.callBridge(bridgeIp, () => client.getLights());
+      for (const entry of entries) {
+        const light = lights[entry.hueId];
+        if (light) {
+          entry.light = light; // refresh cached capabilities/state
+          const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
+          await this.publishChangedStates(entry, hueStateToFeatureStates(ids, light));
+        }
+      }
+    } catch (error) {
+      logger.warn(`Could not refresh the lights of bridge ${bridgeIp} after the scene: ${error.message}`);
+    }
   }
 
   /**
