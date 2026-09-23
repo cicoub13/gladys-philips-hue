@@ -18,6 +18,9 @@ const logger = createLogger({ name: 'hue-store' });
 const DATA_DIR = process.env.HUE_DATA_DIR || '/data';
 const STORE_FILE = path.join(DATA_DIR, 'bridges.json');
 
+// Owner-only: the file holds the bridge usernames, each a full-control key.
+const FILE_MODE = 0o600;
+
 /**
  * Simple JSON-file store for the list of paired bridges, with an in-memory cache.
  */
@@ -39,6 +42,11 @@ export class BridgeStore {
    * @returns {Promise<Array<{ id: string, ip: string, username: string }>>} Bridges.
    */
   async load() {
+    // A crash between write and rename leaves the temporary file behind: it may
+    // hold credentials, and is never the source of truth (the rename did not happen).
+    await fs.rm(`${this.file}.tmp`, { force: true }).catch(() => {});
+    // Files written by older versions got the default 0644: tighten them.
+    await fs.chmod(this.file, FILE_MODE).catch(() => {});
     try {
       const raw = await fs.readFile(this.file, 'utf8');
       const parsed = JSON.parse(raw);
@@ -70,7 +78,13 @@ export class BridgeStore {
   async persist() {
     await fs.mkdir(path.dirname(this.file), { recursive: true });
     const temporaryFile = `${this.file}.tmp`;
-    await fs.writeFile(temporaryFile, JSON.stringify({ bridges: this.bridges }, null, 2), 'utf8');
+    // `mode` only applies when the file is created: a leftover temporary file
+    // would otherwise lend its (looser) mode to the store through the rename.
+    await fs.rm(temporaryFile, { force: true });
+    await fs.writeFile(temporaryFile, JSON.stringify({ bridges: this.bridges }, null, 2), {
+      encoding: 'utf8',
+      mode: FILE_MODE,
+    });
     await fs.rename(temporaryFile, this.file);
   }
 

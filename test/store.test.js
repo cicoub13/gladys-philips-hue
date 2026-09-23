@@ -83,3 +83,37 @@ test('BridgeStore starts empty rather than crashing on a corrupted file', async 
   await reopened.load();
   assert.equal(reopened.list().length, 1);
 });
+
+test('the bridge store is readable by its owner only', async () => {
+  // It holds the bridge usernames, each a full-control key to the lights.
+  const file = await tempFile();
+  const store = new BridgeStore(file);
+  await store.load();
+  await store.upsert({ id: 'b1', ip: '10.0.0.1', username: 'u1' });
+  assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+});
+
+test('a store written by an older version is tightened at load', async () => {
+  const file = await tempFile();
+  await fs.writeFile(file, JSON.stringify({ bridges: [{ id: 'b1', ip: '10.0.0.1', username: 'u1' }] }), {
+    mode: 0o644,
+  });
+  const store = new BridgeStore(file);
+  await store.load();
+  assert.equal(store.list().length, 1);
+  assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+});
+
+test('a temporary file left by an interrupted write is cleaned up and never reused', async () => {
+  // A crash between the write and the rename leaves `bridges.json.tmp` behind,
+  // world-readable: it must not linger, nor lend its mode to the next write.
+  const file = await tempFile();
+  await fs.writeFile(`${file}.tmp`, '{"bridges": [', { mode: 0o644 });
+  const store = new BridgeStore(file);
+  await store.load();
+  await assert.rejects(() => fs.access(`${file}.tmp`), 'the leftover is removed at load');
+
+  await fs.writeFile(`${file}.tmp`, '{"bridges": [', { mode: 0o644 });
+  await store.upsert({ id: 'b1', ip: '10.0.0.1', username: 'u1' });
+  assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+});
