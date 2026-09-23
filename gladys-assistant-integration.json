@@ -8,7 +8,7 @@
   },
   "version": "1.2.0",
   "docker_image": "ghcr.io/cicoub13/gladys-philips-hue:1.2.0",
-  "gladys_version": ">=4.62.0",
+  "gladys_version": ">=5.1.0",
   "cover_image": "https://raw.githubusercontent.com/cicoub13/gladys-philips-hue/main/cover.jpg",
   "transports": ["local"],
   "config_schema": [
@@ -109,6 +109,60 @@
         "fr": "Appairer le bridge (appuyez d'abord sur le bouton)"
       },
       "timeout_seconds": 20
+    }
+  ],
+  "scene_actions": [
+    {
+      "key": "activate_scene",
+      "label": {
+        "en": "Activate a Hue scene",
+        "fr": "Activer une scène Hue"
+      },
+      "description": {
+        "en": "Recall a scene created in the Hue app, all its lights at once.",
+        "fr": "Rappelle une scène créée dans l'application Hue, toutes ses lampes d'un coup."
+      },
+      "timeout_seconds": 20,
+      "fields": [
+        {
+          "key": "intro",
+          "type": "section",
+          "label": {
+            "en": "Scene names",
+            "fr": "Noms des scènes"
+          },
+          "description": {
+            "en": "Type the names shown in the Hue app (case does not matter). The room is only needed when several rooms have a scene with that name.",
+            "fr": "Saisissez les noms affichés dans l'application Hue (majuscules indifférentes). La pièce n'est utile que si plusieurs pièces ont une scène de ce nom."
+          }
+        },
+        {
+          "key": "scene",
+          "type": "string",
+          "label": {
+            "en": "Scene",
+            "fr": "Scène"
+          },
+          "placeholder": {
+            "en": "Relax",
+            "fr": "Détente"
+          },
+          "required": true
+        },
+        {
+          "key": "room",
+          "type": "string",
+          "label": {
+            "en": "Room or zone (optional)",
+            "fr": "Pièce ou zone (optionnel)"
+          },
+          "placeholder": {
+            "en": "Living room",
+            "fr": "Salon"
+          },
+          "required": false
+        }
+      ]
     }
   ]
 }

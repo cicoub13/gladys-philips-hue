@@ -60,6 +60,9 @@ gladys.onAction('pair_bridge', () => {
   return pairBridgeAction(manager);
 });
 
+// --- Scene actions (Gladys scene editor) -------------------------------------
+gladys.onSceneAction('activate_scene', (fields) => manager.activateScene(fields));
+
 // --- Configuration updated by the user ---------------------------------------
 gladys.onConfigUpdated(async (newConfig) => {
   logger.info('onConfigUpdated -> new configuration received');

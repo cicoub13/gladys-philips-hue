@@ -18,6 +18,8 @@ locally via its HTTP API — no Hue cloud account required.
   **color** (RGB ⇄ Hue xy), **white temperature** (mireds).
 - Refreshes light states by polling at a configurable interval, publishing only
   the values that actually changed.
+- Recalls the scenes of the Hue app from Gladys scenes (`activate_scene` scene
+  action, Gladys 5.1+), found by name and optional room.
 
 ## Project structure
 
@@ -31,10 +33,11 @@ locally via its HTTP API — no Hue cloud account required.
 │     ├─ discovery.js                # bridge discovery: SSDP -> mDNS -> N-UPnP
 │     ├─ bridge.js                   # Hue bridge REST client (fetch, v1 API)
 │     ├─ mapping.js                  # Hue light <-> Gladys features (pure conversions)
+│     ├─ scenes.js                   # scene action: names -> Hue scene + group (pure)
 │     └─ store.js                    # persistent paired-bridge credentials (/data)
 ├─ test/                             # node:test unit tests (mocked gladys + fetch)
 ├─ docs/{en,fr}.md                   # user documentation (linked from Gladys)
-├─ gladys-assistant-integration.json # manifest (config schema, actions, network discovery)
+├─ gladys-assistant-integration.json # manifest (config schema, actions, scene actions, network discovery)
 ├─ Dockerfile                        # Node 24 Alpine, read-only rootfs, /data volume
 └─ .github/workflows/                # CI (lint + tests), multi-arch build, UI-driven release
 ```

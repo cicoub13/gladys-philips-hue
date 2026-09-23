@@ -19,6 +19,23 @@ qu'elle prend en charge :
 Les états sont rafraîchis par interrogation à l'intervalle choisi dans
 **Intervalle de rafraîchissement** (toutes les minutes par défaut).
 
+## Scènes Hue dans les scènes Gladys
+
+> **Nécessite Gladys 5.1 ou supérieur.**
+
+L'action **Activer une scène Hue** de l'éditeur de scènes Gladys rappelle une
+scène créée dans l'application Hue : toutes ses lampes prennent leur couleur et
+leur luminosité d'un coup, avec la transition du bridge.
+
+- **Scène** : le nom affiché dans l'application Hue, par exemple `Détente`. Les
+  majuscules et les espaces autour sont ignorés.
+- **Pièce ou zone** (optionnel) : à renseigner seulement si plusieurs pièces ont
+  une scène du même nom, par exemple `Salon`.
+
+Si le nom ne correspond à aucune scène, ou à plusieurs, l'action échoue et les
+logs de la scène indiquent les scènes (ou les pièces) disponibles. Le reste de
+la scène Gladys continue de s'exécuter.
+
 ## Configuration
 
 1. Vérifiez que votre bridge Hue est allumé et connecté au même réseau local que

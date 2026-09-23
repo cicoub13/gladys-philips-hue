@@ -251,6 +251,40 @@ export class HueBridgeClient {
   }
 
   /**
+   * Fetch every group (rooms, zones...) known by the bridge.
+   * @returns {Promise<Record<string, object>>} Groups indexed by bridge id.
+   */
+  async getGroups() {
+    this.assertUsername();
+    return this.request(`/api/${this.username}/groups`);
+  }
+
+  /**
+   * Fetch every scene stored on the bridge (without their light states).
+   * @returns {Promise<Record<string, object>>} Scenes indexed by bridge id.
+   */
+  async getScenes() {
+    this.assertUsername();
+    return this.request(`/api/${this.username}/scenes`);
+  }
+
+  /**
+   * Recall a scene on a group. Group `0` is the special "all lights" group,
+   * the one a scene not tied to a room is recalled on.
+   * @param {string} groupId - Group id on the bridge.
+   * @param {string} sceneId - Scene id on the bridge.
+   * @returns {Promise<any>} The bridge response.
+   */
+  async recallScene(groupId, sceneId) {
+    this.assertUsername();
+    // Retried on purpose: recalling a scene twice lands in the same state.
+    return this.request(`/api/${this.username}/groups/${groupId}/action`, {
+      method: 'PUT',
+      body: JSON.stringify({ scene: sceneId }),
+    });
+  }
+
+  /**
    * @private
    * @throws {Error} When no username has been set yet.
    */

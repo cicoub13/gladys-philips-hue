@@ -58,6 +58,32 @@ test('a refused setLightState fails the command instead of reporting success', a
   await assert.rejects(() => client.setLightState('3', { bri: 10 }), /not modifiable/);
 });
 
+test('getGroups and getScenes read the rooms and scenes of the bridge', async () => {
+  const { calls } = mockFetch([{ body: { 1: { name: 'Salon' } } }]);
+  const client = new HueBridgeClient('192.168.1.10', USERNAME);
+  assert.deepEqual(await client.getGroups(), { 1: { name: 'Salon' } });
+  await client.getScenes();
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    [`http://192.168.1.10/api/${USERNAME}/groups`, `http://192.168.1.10/api/${USERNAME}/scenes`],
+  );
+});
+
+test('recallScene sets the scene on its group', async () => {
+  const { calls } = mockFetch([{ body: [{ success: { '/groups/1/action/scene': 'abc' } }] }]);
+  await new HueBridgeClient('192.168.1.10', USERNAME).recallScene('1', 'abc');
+  assert.equal(calls[0].url, `http://192.168.1.10/api/${USERNAME}/groups/1/action`);
+  assert.equal(calls[0].options.method, 'PUT');
+  assert.deepEqual(JSON.parse(calls[0].options.body), { scene: 'abc' });
+});
+
+test('the scene calls refuse to run before pairing', async () => {
+  const client = new HueBridgeClient('192.168.1.10');
+  await assert.rejects(() => client.getScenes(), /not paired yet/);
+  await assert.rejects(() => client.getGroups(), /not paired yet/);
+  await assert.rejects(() => client.recallScene('1', 'abc'), /not paired yet/);
+});
+
 test('the username never leaks into an error message', async () => {
   mockFetch([{ ok: false, status: 404 }]);
   const client = new HueBridgeClient('192.168.1.10', USERNAME);
