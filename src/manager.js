@@ -15,7 +15,7 @@
 import { createLogger } from '@gladysassistant/integration-sdk';
 import { HueBridgeClient, HUE_LINK_BUTTON_NOT_PRESSED } from './hue/bridge.js';
 import { discoverBridges } from './hue/discovery.js';
-import { identifyBridges } from './hue/identify.js';
+import { identifyBridges, parseBridgeConfig } from './hue/identify.js';
 import { BridgeStore } from './hue/store.js';
 import { FEATURE, featureValueToHueState, hueStateToFeatureStates, lightToDevicePayload } from './hue/mapping.js';
 
@@ -29,6 +29,46 @@ const APP_NAME = 'gladys#philips-hue';
 
 // Every FEATURE kind we may have to dispatch a command to.
 const FEATURE_KINDS = [FEATURE.ON_OFF, FEATURE.BRIGHTNESS, FEATURE.COLOR, FEATURE.TEMPERATURE];
+
+// Background resync of unreachable bridges: capped exponential backoff.
+const RESYNC_BASE_MS = 5000;
+const RESYNC_MAX_MS = 5 * 60 * 1000;
+
+// A light missing from the registry triggers a full resync, at most this often
+// (a device deleted on the bridge side would otherwise resync on every poll).
+const REFRESH_MIN_INTERVAL_MS = 30000;
+
+const NO_BRIDGE_MESSAGE = {
+  en: 'No Hue bridge paired yet. Use the "Discover bridges" and "Pair bridge" buttons above.',
+  fr: 'Aucun bridge Hue appairé. Utilisez les boutons « Découvrir les bridges » et « Appairer le bridge » ci-dessus.',
+};
+
+const ALL_UNREACHABLE_MESSAGE = {
+  en: 'Hue bridge unreachable. Check that it is powered on and on the same network as Gladys.',
+  fr: "Bridge Hue injoignable. Vérifiez qu'il est allumé et sur le même réseau que Gladys.",
+};
+
+/**
+ * Delay before the next resync attempt: doubles from 5 s up to 5 min, with
+ * jitter over the upper half of the step.
+ * @param {number} attempt - Number of attempts already made.
+ * @param {number} [random] - Value in [0, 1], injectable for tests.
+ * @returns {number} Delay in milliseconds.
+ */
+export function nextResyncDelay(attempt, random = Math.random()) {
+  const step = Math.min(RESYNC_BASE_MS * 2 ** attempt, RESYNC_MAX_MS);
+  return Math.round(step / 2 + (random * step) / 2);
+}
+
+/**
+ * Whether an error means the bridge did not answer at all. A Hue business error
+ * or an HTTP status proves it is up.
+ * @param {Error & { hueErrorType?: number, httpStatus?: number }} error - Bridge error.
+ * @returns {boolean} True for a network-level failure.
+ */
+function isUnreachable(error) {
+  return error.hueErrorType === undefined && error.httpStatus === undefined;
+}
 
 export class HueManager {
   /**
@@ -47,6 +87,15 @@ export class HueManager {
      * }>}
      */
     this.registry = new Map();
+    /** @type {Set<string>} IPs of the paired bridges that did not answer last time. */
+    this.unreachable = new Set();
+    /** Last status sent to Gladys, to only send changes. */
+    this.statusKey = undefined;
+    this.resyncTimer = undefined;
+    this.resyncAttempts = 0;
+    this.refreshing = undefined;
+    this.lastRefreshAt = 0;
+    this.stopped = false;
   }
 
   /**
@@ -95,14 +144,22 @@ export class HueManager {
     const nextRegistry = new Map();
     const devices = [];
     let unreachable = 0;
+    // Forget bridges that are no longer paired, or whose address changed.
+    for (const ip of this.unreachable) {
+      if (!bridges.some((bridge) => bridge.ip === ip)) {
+        this.unreachable.delete(ip);
+      }
+    }
 
     for (const bridge of bridges) {
       const client = this.clientFor(bridge);
       let lights;
       try {
         lights = await client.getLights();
+        this.unreachable.delete(bridge.ip);
       } catch (error) {
         unreachable += 1;
+        this.unreachable.add(bridge.ip);
         logger.warn(`Could not read lights from bridge ${bridge.ip}: ${error.message}`);
         // Carry over what we already knew about this bridge's lights.
         for (const [deviceId, entry] of this.registry) {
@@ -112,10 +169,14 @@ export class HueManager {
         }
         continue;
       }
+      if (!bridge.id) {
+        await this.learnBridgeId(bridge, client);
+      }
 
       for (const [hueId, light] of Object.entries(lights)) {
         // uniqueid is the light's MAC-based id: unique and stable across reboots.
-        const platformId = `${bridge.id || bridge.ip}-${light.uniqueid || hueId}`;
+        // `platformKey` keeps the IP-based ids of bridges paired without an id.
+        const platformId = `${bridge.platformKey || bridge.id || bridge.ip}-${light.uniqueid || hueId}`;
         const ids = this.gladys.externalIds(DEVICE_TYPE, platformId);
         const payload = lightToDevicePayload(ids, light);
         payload.poll_frequency = this.config.poll_frequency;
@@ -139,6 +200,28 @@ export class HueManager {
   }
 
   /**
+   * Record the id of a bridge paired by 1.0.x/1.1.0 through the manual IP field,
+   * which saved none. The store freezes its current IP as `platformKey`, so its
+   * lights keep their external_ids, and a later pairing at a new address is
+   * recognized as the same bridge instead of a new one. Best-effort: retried on
+   * the next scan when the bridge does not answer.
+   * @param {{ id: string, ip: string }} bridge - Stored bridge without an id.
+   * @param {HueBridgeClient} client - Client for that bridge.
+   * @returns {Promise<void>} Resolves once done (or given up).
+   */
+  async learnBridgeId(bridge, client) {
+    try {
+      const identity = parseBridgeConfig(bridge.ip, await client.getConfig());
+      if (identity) {
+        await this.store.upsert({ id: identity.id, ip: bridge.ip });
+        logger.info(`Bridge ${bridge.ip} identified as ${identity.id}`);
+      }
+    } catch (error) {
+      logger.debug(`Could not read the id of bridge ${bridge.ip}: ${error.message}`);
+    }
+  }
+
+  /**
    * Refresh the device list in Gladys and report the integration status.
    *
    * Single entry point used at startup, on reconnection, after a config change
@@ -147,37 +230,169 @@ export class HueManager {
    */
   async syncDevices() {
     if (this.store.list().length === 0) {
-      await this.gladys.setConnectionStatus(false, {
-        en: 'No Hue bridge paired yet. Use the "Discover bridges" and "Pair bridge" buttons above.',
-        fr: 'Aucun bridge Hue appairé. Utilisez les boutons « Découvrir les bridges » et « Appairer le bridge » ci-dessus.',
-      });
+      await this.reportStatus(true);
       return [];
     }
 
-    const { devices, reachable, unreachable } = await this.buildDiscoveredDevices();
+    const { devices, reachable } = await this.buildDiscoveredDevices();
+    // Nobody else would retry: without this, a bridge down at startup stayed
+    // "unreachable" until the user clicked something.
+    this.scheduleResync();
 
     if (reachable === 0) {
       // Publishing an empty list here would wipe the Discovery tab because of a
       // transient network glitch. Keep the previous list and say what is wrong.
       logger.warn('No bridge reachable, keeping the previously published devices');
-      await this.gladys.setConnectionStatus(false, {
-        en: 'Hue bridge unreachable. Check that it is powered on and on the same network as Gladys.',
-        fr: "Bridge Hue injoignable. Vérifiez qu'il est allumé et sur le même réseau que Gladys.",
-      });
+      await this.reportStatus(true);
       return [];
     }
 
     await this.gladys.publishDiscoveredDevices(devices);
-
-    if (unreachable > 0) {
-      await this.gladys.setConnectionStatus(false, {
-        en: `${unreachable} Hue bridge(s) unreachable, their lights are unavailable.`,
-        fr: `${unreachable} bridge(s) Hue injoignable(s), leurs lampes sont indisponibles.`,
-      });
-    } else {
-      await this.gladys.setConnectionStatus(true);
-    }
+    await this.reportStatus(true);
     return devices;
+  }
+
+  /**
+   * Send the integration status derived from the paired bridges and the ones
+   * that did not answer. Only changes are sent, unless `force` is set.
+   * @param {boolean} [force] - Send even when unchanged (full resync).
+   * @returns {Promise<void>} Resolves once sent (or skipped).
+   */
+  async reportStatus(force = false) {
+    const paired = this.store.list().length;
+    const down = this.unreachable.size;
+    let status;
+    if (paired === 0) {
+      status = [false, NO_BRIDGE_MESSAGE];
+    } else if (down === 0) {
+      status = [true];
+    } else if (down >= paired) {
+      status = [false, ALL_UNREACHABLE_MESSAGE];
+    } else {
+      status = [
+        false,
+        {
+          en: `${down} Hue bridge(s) unreachable, their lights are unavailable.`,
+          fr: `${down} bridge(s) Hue injoignable(s), leurs lampes sont indisponibles.`,
+        },
+      ];
+    }
+    const key = JSON.stringify(status);
+    if (!force && key === this.statusKey) {
+      return;
+    }
+    await this.gladys.setConnectionStatus(...status);
+    this.statusKey = key;
+  }
+
+  /**
+   * Record whether a bridge answered a poll or command, and update the status
+   * and the resync loop accordingly. Never throws: the caller's own outcome is
+   * what Gladys must see.
+   * @param {string} ip - Bridge address.
+   * @param {boolean} reachable - Whether it answered.
+   * @returns {Promise<void>} Resolves once reported.
+   */
+  async markBridge(ip, reachable) {
+    if (reachable) {
+      this.unreachable.delete(ip);
+    } else {
+      this.unreachable.add(ip);
+    }
+    this.scheduleResync();
+    try {
+      await this.reportStatus();
+    } catch (error) {
+      logger.warn(`Could not report the connection status: ${error.message}`);
+    }
+  }
+
+  /**
+   * Run one call to a bridge, recording whether it answered.
+   * @param {string} ip - Bridge address.
+   * @param {() => Promise<any>} operation - The call.
+   * @returns {Promise<any>} The call's result.
+   */
+  async callBridge(ip, operation) {
+    try {
+      const result = await operation();
+      await this.markBridge(ip, true);
+      return result;
+    } catch (error) {
+      await this.markBridge(ip, !isUnreachable(error));
+      throw error;
+    }
+  }
+
+  /**
+   * Arm the single background resync while a bridge is unreachable, disarm it
+   * once they all answer. Idempotent: never two timers at once.
+   */
+  scheduleResync() {
+    if (this.unreachable.size === 0) {
+      clearTimeout(this.resyncTimer);
+      this.resyncTimer = undefined;
+      this.resyncAttempts = 0;
+      return;
+    }
+    if (this.resyncTimer || this.stopped) {
+      return;
+    }
+    const delay = nextResyncDelay(this.resyncAttempts);
+    this.resyncAttempts += 1;
+    logger.info(`Retrying the unreachable Hue bridge(s) in ${Math.round(delay / 1000)} s`);
+    this.resyncTimer = setTimeout(() => this.resync(), delay);
+    // The Gladys WebSocket keeps the process alive; this timer must not.
+    this.resyncTimer.unref();
+  }
+
+  /**
+   * One background resync attempt (republishes devices and status).
+   * @returns {Promise<void>} Resolves once done.
+   */
+  async resync() {
+    clearTimeout(this.resyncTimer);
+    this.resyncTimer = undefined;
+    try {
+      await this.syncDevices();
+    } catch (error) {
+      logger.warn(`Background resync failed: ${error.message}`);
+      this.scheduleResync();
+    }
+  }
+
+  /**
+   * Stop the background work (shutdown).
+   */
+  stop() {
+    this.stopped = true;
+    clearTimeout(this.resyncTimer);
+    this.resyncTimer = undefined;
+  }
+
+  /**
+   * A light missing from the registry (bridge down when it was last read, or
+   * the process just started) triggers a resync before giving up on it, so it
+   * works as soon as its bridge answers again. Concurrent calls share it.
+   * @param {object} device - Gladys device (has `external_id`).
+   * @returns {Promise<void>} Resolves once the registry is as fresh as it gets.
+   */
+  async ensureRegistered(device) {
+    if (this.registry.has(device.external_id) || this.store.list().length === 0) {
+      return;
+    }
+    if (!this.refreshing) {
+      if (Date.now() - this.lastRefreshAt < REFRESH_MIN_INTERVAL_MS) {
+        return;
+      }
+      this.lastRefreshAt = Date.now();
+      this.refreshing = this.syncDevices()
+        .catch((error) => logger.warn(`Resync for ${device.external_id} failed: ${error.message}`))
+        .finally(() => {
+          this.refreshing = undefined;
+        });
+    }
+    await this.refreshing;
   }
 
   /**
@@ -189,6 +404,11 @@ export class HueManager {
   resolve(device) {
     const entry = this.registry.get(device.external_id);
     if (!entry) {
+      if (this.unreachable.size > 0) {
+        throw new Error(
+          `Hue bridge unreachable: light ${device.external_id} will be available again as soon as the bridge answers`,
+        );
+      }
       throw new Error(`Unknown light ${device.external_id}: run a scan from the Discovery tab`);
     }
     const bridge = this.store.list().find((b) => b.ip === entry.bridgeIp);
@@ -224,6 +444,7 @@ export class HueManager {
    * @returns {Promise<void>} Resolves once the state is published.
    */
   async setValue(device, feature, value) {
+    await this.ensureRegistered(device);
     const { entry, client } = this.resolve(device);
     const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
     const kind = FEATURE_KINDS.find((k) => ids.feature(k) === feature.external_id);
@@ -234,7 +455,7 @@ export class HueManager {
     const hueState = featureValueToHueState(kind, value, entry.light);
     logger.info(`setValue ${feature.external_id} = ${value} -> ${JSON.stringify(hueState)}`);
     // Throws (and fails the command in Gladys) when the bridge refuses it.
-    await client.setLightState(entry.hueId, hueState);
+    await this.callBridge(entry.bridgeIp, () => client.setLightState(entry.hueId, hueState));
 
     // Echo the commanded value back so Gladys reflects it immediately, along
     // with the on/off state it implies: setting a colour, a temperature or a
@@ -252,8 +473,9 @@ export class HueManager {
    * @returns {Promise<void>} Resolves once states are published.
    */
   async poll(device) {
+    await this.ensureRegistered(device);
     const { entry, client } = this.resolve(device);
-    const light = await client.getLight(entry.hueId);
+    const light = await this.callBridge(entry.bridgeIp, () => client.getLight(entry.hueId));
     entry.light = light; // refresh cached capabilities/state
     const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
     await this.publishChangedStates(entry, hueStateToFeatureStates(ids, light));

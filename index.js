@@ -20,6 +20,13 @@ import { normalizeConfig } from './src/config.js';
 import { HueManager } from './src/manager.js';
 import { discoverBridgesAction, pairBridgeAction } from './src/actions.js';
 
+// Safety net: a rejection nobody handles is a bug. Log it where the user can
+// see it, then exit so the Gladys supervisor restarts from a clean state.
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled promise rejection, exiting:', reason);
+  process.exit(1);
+});
+
 const gladys = new GladysIntegration();
 
 // The manager owns bridges, the dispatch registry and the Hue protocol.
@@ -80,6 +87,7 @@ gladys.on('connected', async () => {
 // --- Graceful shutdown -------------------------------------------------------
 gladys.handleShutdown((signal) => {
   logger.info(`Received ${signal} -> graceful shutdown`);
+  manager.stop();
 });
 
 // --- Startup -----------------------------------------------------------------
@@ -88,6 +96,8 @@ manager
   .init()
   .then(() => gladys.connect())
   .catch((err) => {
-    logger.error('Initial connection failed', err);
-    process.exit(1);
+    // connect() rejects when Gladys refuses the token on the first attempt,
+    // which also happens transiently while Gladys boots. The SDK keeps
+    // reconnecting on its own: stay up and let it.
+    logger.error(`Initial connection to Gladys failed (${err.message}), the SDK keeps retrying`);
   });

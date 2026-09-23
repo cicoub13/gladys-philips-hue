@@ -101,7 +101,19 @@ export function requestJson(url, options = {}) {
   const secure = target.protocol === 'https:';
   const transport = secure ? https : http;
 
-  return new Promise((resolve, reject) => {
+  return new Promise((resolvePromise, rejectPromise) => {
+    // One overall deadline for the whole exchange. A socket timeout only
+    // measures inactivity, so a bridge trickling bytes would never trip it.
+    let deadline;
+    const resolve = (value) => {
+      clearTimeout(deadline);
+      resolvePromise(value);
+    };
+    const reject = (error) => {
+      clearTimeout(deadline);
+      rejectPromise(error);
+    };
+
     const request = transport.request(
       target,
       {
@@ -154,12 +166,21 @@ export function requestJson(url, options = {}) {
             reject(new Error(`Bridge ${target.hostname} returned a non-JSON body on ${target.pathname}`));
           }
         });
+        // A connection dropped mid-body emits neither 'end' nor 'error' on the
+        // response: without this the promise would never settle.
+        response.on('close', () => {
+          if (!response.complete) {
+            reject(new Error(`Bridge ${target.hostname} closed the connection before the end of its answer`));
+          }
+        });
       },
     );
 
-    request.setTimeout(timeoutMs, () => {
-      request.destroy(new Error(`Bridge ${target.hostname} did not answer within ${timeoutMs} ms`));
-    });
+    deadline = setTimeout(() => {
+      const error = new Error(`Bridge ${target.hostname} did not answer within ${timeoutMs} ms`);
+      reject(error);
+      request.destroy(error);
+    }, timeoutMs);
     request.on('error', reject);
 
     if (body !== undefined) {

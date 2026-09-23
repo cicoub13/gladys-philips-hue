@@ -18,6 +18,9 @@ const logger = createLogger({ name: 'hue-store' });
 const DATA_DIR = process.env.HUE_DATA_DIR || '/data';
 const STORE_FILE = path.join(DATA_DIR, 'bridges.json');
 
+// Owner-only: the file holds the bridge usernames, each a full-control key.
+const FILE_MODE = 0o600;
+
 /**
  * Simple JSON-file store for the list of paired bridges, with an in-memory cache.
  */
@@ -39,6 +42,11 @@ export class BridgeStore {
    * @returns {Promise<Array<{ id: string, ip: string, username: string }>>} Bridges.
    */
   async load() {
+    // A crash between write and rename leaves the temporary file behind: it may
+    // hold credentials, and is never the source of truth (the rename did not happen).
+    await fs.rm(`${this.file}.tmp`, { force: true }).catch(() => {});
+    // Files written by older versions got the default 0644: tighten them.
+    await fs.chmod(this.file, FILE_MODE).catch(() => {});
     try {
       const raw = await fs.readFile(this.file, 'utf8');
       const parsed = JSON.parse(raw);
@@ -70,7 +78,13 @@ export class BridgeStore {
   async persist() {
     await fs.mkdir(path.dirname(this.file), { recursive: true });
     const temporaryFile = `${this.file}.tmp`;
-    await fs.writeFile(temporaryFile, JSON.stringify({ bridges: this.bridges }, null, 2), 'utf8');
+    // `mode` only applies when the file is created: a leftover temporary file
+    // would otherwise lend its (looser) mode to the store through the rename.
+    await fs.rm(temporaryFile, { force: true });
+    await fs.writeFile(temporaryFile, JSON.stringify({ bridges: this.bridges }, null, 2), {
+      encoding: 'utf8',
+      mode: FILE_MODE,
+    });
     await fs.rename(temporaryFile, this.file);
   }
 
@@ -86,13 +100,22 @@ export class BridgeStore {
    * @param {{ id: string, ip: string, username: string, scheme?: string, certFingerprint?: string }} bridge -
    * Bridge credentials, plus the transport learned at pairing time: the scheme the bridge answers on and, for
    * HTTPS bridges, the certificate fingerprint pinned on first contact. Entries saved by older versions simply
-   * have neither and fall back to plain HTTP.
+   * have neither and fall back to plain HTTP. `platformKey` is set by the store itself (see below).
    * @returns {Promise<void>} Resolves once stored (persisted or in memory only).
    */
   async upsert(bridge) {
     const key = bridge.id || bridge.ip;
-    const existing = this.bridges.find((b) => (b.id || b.ip) === key);
+    // Up to 1.1.0 a bridge paired through the manual IP field was saved without
+    // an id: the same bridge coming back WITH its id must update that entry.
+    const existing =
+      this.bridges.find((b) => (b.id || b.ip) === key) ||
+      (bridge.id ? this.bridges.find((b) => !b.id && b.ip === bridge.ip) : undefined);
     if (existing) {
+      if (!existing.id && bridge.id && !existing.platformKey) {
+        // Its lights' external_ids were built from that IP: freeze it, so they
+        // survive the id being learned and any later change of address.
+        existing.platformKey = existing.ip;
+      }
       Object.assign(existing, bridge);
     } else {
       this.bridges.push(bridge);
