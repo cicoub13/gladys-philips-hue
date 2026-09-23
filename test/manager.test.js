@@ -246,6 +246,57 @@ test('init loads the bridges persisted by a previous run', async () => {
   assert.equal(manager.store.list().length, 1);
 });
 
+/**
+ * A manager over a bridges.json exactly as 1.0.x/1.1.0 wrote it for a bridge
+ * paired through the manual IP field: no bridge id, so its lights' external_ids
+ * are built from the IP.
+ * @returns {Promise<{ manager: HueManager, client: object, store: BridgeStore, file: string }>} Handles.
+ */
+async function makeLegacyManager() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hue-legacy-'));
+  const file = path.join(dir, 'bridges.json');
+  await fs.writeFile(file, JSON.stringify({ bridges: [{ id: '', ip: '192.168.1.10', username: 'user-1' }] }, null, 2));
+  const store = new BridgeStore(file);
+  await store.load();
+  const manager = new HueManager(makeGladys(), { ...DEFAULT_CONFIG }, store);
+  const client = makeFakeClient();
+  manager.clientFor = () => client;
+  return { manager, client, store, file };
+}
+
+test('a bridge paired by 1.1.0 without an id keeps its external_ids when paired again', async () => {
+  // Re-pairing used to append a second entry keyed by the real bridge id: every
+  // light came back under new external_ids, orphaning the devices already created.
+  const { manager, store } = await makeLegacyManager();
+  await manager.buildDiscoveredDevices();
+  const before = [...manager.registry.keys()];
+  assert.match(before[0], /:192\.168\.1\.10-/, 'the legacy external_id is IP-based');
+
+  await store.upsert({ id: 'abc', ip: '192.168.1.10', username: 'user-2', scheme: 'http' });
+  assert.equal(store.list().length, 1, 'the legacy entry is updated, not duplicated');
+  assert.equal(store.list()[0].username, 'user-2');
+
+  await manager.buildDiscoveredDevices();
+  assert.deepEqual([...manager.registry.keys()], before);
+});
+
+test('a legacy bridge learns its id, so a later IP change keeps its external_ids', async () => {
+  const { manager, client, store, file } = await makeLegacyManager();
+  client.getConfig = async () => ({ bridgeid: '001788FFFE1234AB', modelid: 'BSB002', apiversion: '1.63.0' });
+  await manager.buildDiscoveredDevices();
+  const before = [...manager.registry.keys()];
+
+  const reopened = new BridgeStore(file);
+  await reopened.load();
+  assert.equal(reopened.list()[0].id, '001788fffe1234ab', 'the id is persisted');
+
+  // The DHCP lease changes, the user pairs again at the new address.
+  await store.upsert({ id: '001788fffe1234ab', ip: '192.168.1.99', username: 'user-2', scheme: 'http' });
+  assert.equal(store.list().length, 1);
+  await manager.buildDiscoveredDevices();
+  assert.deepEqual([...manager.registry.keys()], before);
+});
+
 test('candidateBridges merges the discovered bridges with the manual address', async () => {
   const { manager } = await makeManager();
   manager.config = { ...DEFAULT_CONFIG, bridge_ip: '10.0.0.5' };

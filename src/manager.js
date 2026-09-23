@@ -15,7 +15,7 @@
 import { createLogger } from '@gladysassistant/integration-sdk';
 import { HueBridgeClient, HUE_LINK_BUTTON_NOT_PRESSED } from './hue/bridge.js';
 import { discoverBridges } from './hue/discovery.js';
-import { identifyBridges } from './hue/identify.js';
+import { identifyBridges, parseBridgeConfig } from './hue/identify.js';
 import { BridgeStore } from './hue/store.js';
 import { FEATURE, featureValueToHueState, hueStateToFeatureStates, lightToDevicePayload } from './hue/mapping.js';
 
@@ -112,10 +112,14 @@ export class HueManager {
         }
         continue;
       }
+      if (!bridge.id) {
+        await this.learnBridgeId(bridge, client);
+      }
 
       for (const [hueId, light] of Object.entries(lights)) {
         // uniqueid is the light's MAC-based id: unique and stable across reboots.
-        const platformId = `${bridge.id || bridge.ip}-${light.uniqueid || hueId}`;
+        // `platformKey` keeps the IP-based ids of bridges paired without an id.
+        const platformId = `${bridge.platformKey || bridge.id || bridge.ip}-${light.uniqueid || hueId}`;
         const ids = this.gladys.externalIds(DEVICE_TYPE, platformId);
         const payload = lightToDevicePayload(ids, light);
         payload.poll_frequency = this.config.poll_frequency;
@@ -136,6 +140,28 @@ export class HueManager {
     const reachable = bridges.length - unreachable;
     logger.info(`Discovered ${devices.length} light(s) across ${reachable}/${bridges.length} reachable bridge(s)`);
     return { devices, reachable, unreachable };
+  }
+
+  /**
+   * Record the id of a bridge paired by 1.0.x/1.1.0 through the manual IP field,
+   * which saved none. The store freezes its current IP as `platformKey`, so its
+   * lights keep their external_ids, and a later pairing at a new address is
+   * recognized as the same bridge instead of a new one. Best-effort: retried on
+   * the next scan when the bridge does not answer.
+   * @param {{ id: string, ip: string }} bridge - Stored bridge without an id.
+   * @param {HueBridgeClient} client - Client for that bridge.
+   * @returns {Promise<void>} Resolves once done (or given up).
+   */
+  async learnBridgeId(bridge, client) {
+    try {
+      const identity = parseBridgeConfig(bridge.ip, await client.getConfig());
+      if (identity) {
+        await this.store.upsert({ id: identity.id, ip: bridge.ip });
+        logger.info(`Bridge ${bridge.ip} identified as ${identity.id}`);
+      }
+    } catch (error) {
+      logger.debug(`Could not read the id of bridge ${bridge.ip}: ${error.message}`);
+    }
   }
 
   /**
