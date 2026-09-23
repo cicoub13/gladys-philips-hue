@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { HueManager } from '../src/manager.js';
+import { HueManager, nextResyncDelay } from '../src/manager.js';
 import { BridgeStore } from '../src/hue/store.js';
 import { FEATURE } from '../src/hue/mapping.js';
 import { resetDiscoveryCache } from '../src/hue/discovery.js';
@@ -423,4 +423,105 @@ test('clientFor carries the scheme and pinned certificate of an HTTPS bridge', a
   assert.equal(client.scheme, 'https');
   assert.equal(client.certFingerprint, 'DEADBEEF');
   assert.equal(client.id, 'abc');
+});
+
+// The external_id makeManager()'s only light gets.
+const SALON_ID = 'ext:test:light:b1-00:17:88:01:aa';
+
+test('a bridge down at startup: its lights work as soon as it answers, without a manual scan', async () => {
+  // After a power cut the container starts before the bridge. The registry
+  // stayed empty and every poll/command failed with "unknown light, run a scan"
+  // until the user clicked something.
+  const { manager, gladys, client } = await makeManager();
+  client.down = true;
+  await manager.syncDevices();
+  assert.equal(manager.registry.size, 0);
+
+  client.down = false;
+  await manager.poll({ external_id: SALON_ID });
+  assert.ok(gladys.recorded.states.length > 0, 'the light was polled');
+  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true, 'the status recovered');
+  manager.stop();
+});
+
+test('while its bridge is down, a light says so instead of "run a scan"', async () => {
+  const { manager, client } = await makeManager();
+  client.down = true;
+  await manager.syncDevices();
+  await assert.rejects(() => manager.poll({ external_id: SALON_ID }), /unreachable/);
+  manager.stop();
+});
+
+test('an unreachable bridge is resynchronized in the background until it answers', async () => {
+  const { manager, gladys, client } = await makeManager();
+  client.down = true;
+  await manager.syncDevices();
+  assert.ok(manager.resyncTimer, 'a resync is scheduled');
+  const scheduled = manager.resyncTimer;
+  await manager.syncDevices();
+  assert.equal(manager.resyncTimer, scheduled, 'never two resync loops at once');
+
+  client.down = false;
+  await manager.resync();
+  assert.equal(gladys.recorded.discovered.length, 1, 'the lights are published');
+  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true);
+  assert.equal(manager.resyncTimer, undefined, 'the loop stops once everything answers');
+});
+
+test('stop() cancels the resync loop for good', async () => {
+  const { manager, client } = await makeManager();
+  client.down = true;
+  await manager.syncDevices();
+  manager.stop();
+  assert.equal(manager.resyncTimer, undefined);
+  await manager.syncDevices();
+  assert.equal(manager.resyncTimer, undefined, 'nothing is rescheduled during shutdown');
+});
+
+test('the resync backoff grows exponentially, is capped, and is jittered', () => {
+  assert.equal(nextResyncDelay(0, 1), 5000);
+  assert.equal(nextResyncDelay(1, 1), 10000);
+  assert.equal(nextResyncDelay(20, 1), 300000, 'capped at 5 minutes');
+  assert.equal(nextResyncDelay(1, 0), 5000, 'never below half the step');
+});
+
+test('the status follows the bridge: false when a poll cannot reach it, true when it answers again', async () => {
+  // The status used to be computed at scan time only: a bridge dying an hour
+  // later left "connected" on screen while every command failed.
+  const { manager, gladys, client } = await makeManager();
+  await manager.syncDevices();
+  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true);
+
+  client.down = true;
+  await assert.rejects(() => manager.poll({ external_id: SALON_ID }));
+  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, false);
+  assert.match(gladys.recorded.connectionStatus.at(-1).message.en, /unreachable/);
+  assert.ok(manager.resyncTimer, 'a resync is scheduled');
+
+  client.down = false;
+  await manager.poll({ external_id: SALON_ID });
+  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true);
+  assert.equal(manager.resyncTimer, undefined);
+});
+
+test('the status is only sent when it changes', async () => {
+  const { manager, gladys } = await makeManager();
+  await manager.syncDevices();
+  const sent = gladys.recorded.connectionStatus.length;
+  await manager.poll({ external_id: SALON_ID });
+  await manager.poll({ external_id: SALON_ID });
+  assert.equal(gladys.recorded.connectionStatus.length, sent);
+});
+
+test('a command the bridge refuses does not mark the bridge unreachable', async () => {
+  const { manager, gladys, client } = await makeManager();
+  await manager.syncDevices();
+  client.setLightState = async () => {
+    const error = new Error('Bridge refused: device is off');
+    error.hueErrorType = 201;
+    throw error;
+  };
+  await assert.rejects(() => manager.setValue({ external_id: SALON_ID }, { external_id: `${SALON_ID}:on-off` }, 1));
+  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true);
+  assert.equal(manager.resyncTimer, undefined);
 });

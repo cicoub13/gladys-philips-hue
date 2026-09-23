@@ -80,6 +80,7 @@ gladys.on('connected', async () => {
 // --- Graceful shutdown -------------------------------------------------------
 gladys.handleShutdown((signal) => {
   logger.info(`Received ${signal} -> graceful shutdown`);
+  manager.stop();
 });
 
 // --- Startup -----------------------------------------------------------------
