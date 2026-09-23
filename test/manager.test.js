@@ -557,20 +557,89 @@ test('activateScene refreshes the lights of the scene right away', async () => {
   const { manager, gladys, client } = await makeManager();
   withScenes(client);
   await manager.syncDevices();
+  let reads = 0;
+  const getLights = client.getLights;
+  client.getLights = async function () {
+    reads += 1;
+    return getLights.call(this);
+  };
   await manager.activateScene({ scene: 'Détente' });
+  await new Promise(setImmediate); // the refresh runs after the ack
   const onOff = gladys.recorded.states.find((s) => s.device_feature_external_id === `${SALON_ID}:on-off`);
   assert.equal(onOff.state, 1);
+  assert.equal(reads, 1, 'one read of the bridge, not one per light');
 });
 
 test('activateScene still succeeds when the refresh after it fails', async () => {
   const { manager, client } = await makeManager();
   withScenes(client);
   await manager.syncDevices();
-  client.getLight = async () => {
+  client.getLights = async () => {
     throw new Error('connect EHOSTUNREACH');
   };
   await manager.activateScene({ scene: 'Détente' });
+  await new Promise(setImmediate);
   assert.equal(client.recalled.length, 1);
+  manager.stop();
+});
+
+test('activateScene does not wait for the refresh before answering', async () => {
+  const { manager, client } = await makeManager();
+  withScenes(client);
+  await manager.syncDevices();
+  client.getLights = () => new Promise(() => {}); // a bridge busy with the transition
+  await manager.activateScene({ scene: 'Détente' });
+  assert.equal(client.recalled.length, 1);
+});
+
+test('activateScene reads every bridge at once', async () => {
+  const { manager, client, store } = await makeManager();
+  withScenes(client);
+  await store.upsert({ id: 'b2', ip: '192.168.1.20', username: 'user-2' });
+  const started = [];
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const slow = withScenes(makeFakeClient());
+  slow.getScenes = async () => {
+    started.push('192.168.1.20');
+    await gate;
+    return {};
+  };
+  const getScenes = client.getScenes;
+  client.getScenes = async () => {
+    started.push('192.168.1.10');
+    await gate;
+    return getScenes();
+  };
+  manager.clientFor = (bridge) => (bridge.ip === '192.168.1.20' ? slow : client);
+
+  const done = manager.activateScene({ scene: 'Lecture' });
+  await new Promise(setImmediate);
+  assert.deepEqual(started.sort(), ['192.168.1.10', '192.168.1.20']);
+  release();
+  await done;
+  assert.deepEqual(client.recalled, [{ groupId: '1', sceneId: 's2' }]);
+});
+
+test('activateScene gives the real reason of a bridge that answered with an error', async () => {
+  const { manager, client, store } = await makeManager();
+  withScenes(client);
+  await store.upsert({ id: 'b2', ip: '192.168.1.20', username: 'user-2' });
+  const refusing = makeFakeClient();
+  refusing.getGroups = async () => {
+    const error = new Error('Bridge 192.168.1.20 refused /api/***/groups: unauthorized user');
+    error.hueErrorType = 1;
+    throw error;
+  };
+  refusing.getScenes = async () => ({});
+  manager.clientFor = (bridge) => (bridge.ip === '192.168.1.20' ? refusing : client);
+
+  await assert.rejects(
+    () => manager.activateScene({ scene: 'Cinéma' }),
+    (error) => /unauthorized user\)$/.test(error.message) && !/unreachable/.test(error.message),
+  );
 });
 
 test('activateScene fails with the available scenes when the name is unknown', async () => {

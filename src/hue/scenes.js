@@ -119,7 +119,15 @@ export function findScene(candidates, sceneName, roomName) {
     const names = pool.map((candidate) => candidate.sceneName);
     throw new Error(`Hue scene "${sceneName}" not found${where}. Available scenes: ${listNames(names)}`);
   }
-  const rooms = listNames(matches.map((candidate) => candidate.roomName || 'no room'));
-  const hint = wantedRoom ? '' : ': fill in the Room field to pick one';
-  throw new Error(`Several Hue scenes are named "${sceneName}" (rooms: ${rooms})${hint}`);
+  const rooms = matches.map((candidate) => candidate.roomName || 'no room');
+  // Same name in the same room (on two bridges, say): the Room field cannot help.
+  if (new Set(rooms.map(normalize)).size < matches.length) {
+    const where = listNames(matches.map((candidate, index) => `${rooms[index]} on bridge ${candidate.bridgeIp}`));
+    throw new Error(
+      `Several Hue scenes are named "${sceneName}" in the same room (${where}): rename one in the Hue app`,
+    );
+  }
+  throw new Error(
+    `Several Hue scenes are named "${sceneName}" (rooms: ${listNames(rooms)}): fill in the Room field to pick one`,
+  );
 }

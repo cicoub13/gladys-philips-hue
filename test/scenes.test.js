@@ -58,6 +58,19 @@ test('findScene refuses to guess between scenes sharing a name', () => {
   );
 });
 
+test('findScene names the bridges when scenes share a name and a room', () => {
+  const twoBridges = [
+    ...listSceneCandidates('192.168.1.10', GROUPS, SCENES),
+    ...listSceneCandidates('192.168.1.20', GROUPS, SCENES),
+  ];
+  for (const room of [undefined, 'Salon']) {
+    assert.throws(
+      () => findScene(twoBridges, 'Lecture', room),
+      /named "Lecture" in the same room \(Salon on bridge 192\.168\.1\.10, Salon on bridge 192\.168\.1\.20\): rename one/,
+    );
+  }
+});
+
 test('findScene lists the available scenes when the name is unknown', () => {
   assert.throws(
     () => findScene(candidates(), 'Cinéma'),

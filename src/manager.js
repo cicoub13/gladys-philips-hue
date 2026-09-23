@@ -496,56 +496,76 @@ export class HueManager {
       throw new Error('No Hue bridge paired yet: pair one from the Configuration screen');
     }
 
+    // In parallel: a hung bridge must not eat the action's timeout before the
+    // others are even asked.
+    const results = await Promise.allSettled(
+      bridges.map((bridge) => {
+        const client = this.clientFor(bridge);
+        return this.callBridge(bridge.ip, () => Promise.all([client.getGroups(), client.getScenes()]));
+      }),
+    );
     const candidates = [];
-    const unreachable = [];
-    for (const bridge of bridges) {
-      const client = this.clientFor(bridge);
-      try {
-        const [groups, scenes] = await this.callBridge(bridge.ip, () =>
-          Promise.all([client.getGroups(), client.getScenes()]),
-        );
-        candidates.push(...listSceneCandidates(bridge.ip, groups, scenes));
-      } catch (error) {
-        logger.warn(`Could not read the scenes of bridge ${bridge.ip}: ${error.message}`);
-        unreachable.push(bridge.ip);
+    const failures = [];
+    results.forEach((result, index) => {
+      const { ip } = bridges[index];
+      if (result.status === 'fulfilled') {
+        const [groups, scenes] = result.value;
+        candidates.push(...listSceneCandidates(ip, groups, scenes));
+        return;
       }
-    }
+      const { reason } = result;
+      logger.warn(`Could not read the scenes of bridge ${ip}: ${reason.message}`);
+      failures.push(isUnreachable(reason) ? `Hue bridge ${ip} unreachable` : reason.message);
+    });
 
     let match;
     try {
       match = findScene(candidates, scene, room);
     } catch (error) {
       // The scene may well be on the bridge that did not answer.
-      if (unreachable.length > 0) {
-        error.message += ` (Hue bridge ${unreachable.join(', ')} unreachable)`;
+      if (failures.length > 0) {
+        error.message += ` (${failures.join('; ')})`;
       }
       throw error;
     }
 
-    const bridge = bridges.find((b) => b.ip === match.bridgeIp);
+    const client = this.clientFor(bridges.find((b) => b.ip === match.bridgeIp));
     logger.info(`Recalling Hue scene "${match.sceneName}" (${match.roomName || 'all lights'}) on ${match.bridgeIp}`);
-    await this.callBridge(match.bridgeIp, () => this.clientFor(bridge).recallScene(match.groupId, match.sceneId));
-    await this.refreshLights(match.bridgeIp, match.lights);
+    await this.callBridge(match.bridgeIp, () => client.recallScene(match.groupId, match.sceneId));
+    // Not awaited: the scene is on, a slow refresh must not delay the ack past
+    // the action's timeout and turn it into a failure.
+    this.refreshLights(match.bridgeIp, client, match.lights);
   }
 
   /**
-   * Poll the known lights among the given ones, best-effort: the command they
-   * follow already succeeded, a failed refresh must not turn it into a failure.
+   * Publish the new state of the known lights among the given ones, from ONE
+   * read of the bridge (not one per light, which would burst its rate limit).
+   * Best-effort, never rejects: the command it follows already succeeded.
    * @param {string} bridgeIp - Bridge the lights belong to.
+   * @param {HueBridgeClient} client - Client of that bridge.
    * @param {string[]} hueIds - Hue ids of the lights.
-   * @returns {Promise<void>} Resolves once every poll settled.
+   * @returns {Promise<void>} Resolves once the states are published.
    */
-  async refreshLights(bridgeIp, hueIds) {
-    const deviceIds = [...this.registry]
-      .filter(([, entry]) => entry.bridgeIp === bridgeIp && hueIds.includes(entry.hueId))
-      .map(([deviceId]) => deviceId);
-    await Promise.all(
-      deviceIds.map((deviceId) =>
-        this.poll({ external_id: deviceId }).catch((error) =>
-          logger.warn(`Could not refresh ${deviceId} after the scene: ${error.message}`),
-        ),
-      ),
+  async refreshLights(bridgeIp, client, hueIds) {
+    const entries = [...this.registry.values()].filter(
+      (entry) => entry.bridgeIp === bridgeIp && hueIds.includes(entry.hueId),
     );
+    if (entries.length === 0) {
+      return;
+    }
+    try {
+      const lights = await this.callBridge(bridgeIp, () => client.getLights());
+      for (const entry of entries) {
+        const light = lights[entry.hueId];
+        if (light) {
+          entry.light = light; // refresh cached capabilities/state
+          const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
+          await this.publishChangedStates(entry, hueStateToFeatureStates(ids, light));
+        }
+      }
+    } catch (error) {
+      logger.warn(`Could not refresh the lights of bridge ${bridgeIp} after the scene: ${error.message}`);
+    }
   }
 
   /**
