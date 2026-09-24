@@ -21,6 +21,18 @@ locally via its HTTP API — no Hue cloud account required.
 - Recalls the scenes of the Hue app from Gladys scenes (`activate_scene` scene
   action, Gladys 5.1+), found by name and optional room.
 
+## Screenshots
+
+Hue lights on a dashboard, with on/off and brightness at a glance (each row opens color and white temperature):
+
+![Philips Hue lights on a Gladys dashboard](docs/images/dashboard.png)
+
+A Gladys scene recalling a scene of the Hue app with the `activate_scene` action:
+
+![A Gladys scene activating a Hue scene](docs/images/scene-action.png)
+
+_Captured on a Gladys 5.1 dashboard with simulated devices and states — values are illustrative._
+
 ## Project structure
 
 ```
