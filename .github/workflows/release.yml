@@ -13,8 +13,12 @@
 #      (`gladys-assistant-integration.json`: `version`, the root `docker_image`
 #      and every sub-container running this same image, so the indexer and
 #      the images stay in lockstep);
+#   2b. when the repo keeps a CHANGELOG.md, turns its `## [Unreleased]` section
+#      into `## [X.Y.Z] - <date>` (an empty one becomes a maintenance entry)
+#      and opens a fresh `## [Unreleased]` above it;
 #   3. commits the bump and pushes the `vX.Y.Z` tag;
-#   4. publishes a GitHub Release with auto-generated notes;
+#   4. publishes a GitHub Release, its notes taken from that changelog section
+#      (auto-generated from the PRs when there is no CHANGELOG.md);
 #   5. calls build.yml to publish the multi-arch image (`:X.Y.Z` + `:latest`).
 #
 # Why call build.yml instead of relying on the tag push: a tag pushed with the
@@ -108,6 +112,43 @@ jobs:
           # otherwise leave `npm run format:check` failing on the next push.
           ./node_modules/.bin/prettier --write gladys-assistant-integration.json
 
+          # Changelog (Keep a Changelog layout): what PRs wrote under
+          # `## [Unreleased]` becomes this version's section, and also the
+          # GitHub Release notes. A release with nothing written there (a
+          # dependency bump) still gets an entry, so no version is missing.
+          if [ -f CHANGELOG.md ]; then
+            if ! grep -q '^## \[Unreleased\]' CHANGELOG.md; then
+              echo "::error file=CHANGELOG.md::no '## [Unreleased]' section to release"
+              exit 1
+            fi
+            notes="${RUNNER_TEMP}/release-notes.md"
+            awk '/^## \[Unreleased\]/ { f = 1; next } f && /^## / { exit } f' CHANGELOG.md > "$notes"
+            fill=""
+            if ! grep -q '[^[:space:]]' "$notes"; then
+              printf '### Changed\n\n- Maintenance release: dependency and build updates, no functional change.\n' > "$notes"
+              fill=1
+            fi
+            awk -v version="$new_version" -v date="$(date +%F)" -v notes="$notes" -v fill="$fill" '
+              /^## \[Unreleased\]/ {
+                print; print ""; print "## [" version "] - " date
+                if (fill) { print ""; while ((getline line < notes) > 0) print line }
+                next
+              }
+              # Compare links, when the file keeps them:
+              # [Unreleased]: <repo>/compare/vPREV...HEAD
+              /^\[Unreleased\]: .*\/compare\/v[^ ]+\.\.\.HEAD$/ {
+                repo = $0; sub(/^\[Unreleased\]: /, "", repo); sub(/\/compare\/.*/, "", repo)
+                prev = $0; sub(/.*\/compare\//, "", prev); sub(/\.\.\.HEAD$/, "", prev)
+                print "[Unreleased]: " repo "/compare/v" version "...HEAD"
+                print "[" version "]: " repo "/compare/" prev "...v" version
+                next
+              }
+              { print }
+            ' CHANGELOG.md > "$tmp"
+            mv "$tmp" CHANGELOG.md
+            ./node_modules/.bin/prettier --write CHANGELOG.md
+          fi
+
           echo "version=${new_version}" >> "$GITHUB_OUTPUT"
 
       # Note: if the branch you release from is protected against direct pushes,
@@ -123,6 +164,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add package.json package-lock.json gladys-assistant-integration.json
+          if [ -f CHANGELOG.md ]; then git add CHANGELOG.md; fi
           git commit -m "chore(release): ${VERSION}"
           git tag -a "v${VERSION}" -m "Release ${VERSION}"
 
@@ -137,9 +179,16 @@ jobs:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
           set -euo pipefail
+          # Written by the bump step when the repo keeps a CHANGELOG.md.
+          notes="${RUNNER_TEMP}/release-notes.md"
+          if [ -f "$notes" ]; then
+            set -- --notes-file "$notes"
+          else
+            set -- --generate-notes
+          fi
           gh release create "v${VERSION}" \
             --title "v${VERSION}" \
-            --generate-notes \
+            "$@" \
             --verify-tag
 
   # Build and publish the image for the version we just tagged.

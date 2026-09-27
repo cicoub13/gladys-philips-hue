@@ -40,6 +40,9 @@ All three must pass before committing: CI runs them, plus a coverage threshold w
 - **Runtime**: read-only root FS (only `/data` is writable), 256 MB RAM, bridge network (no
   broadcast or mDNS: use `scanNetwork()` and manifest `network_discovery`). Register handlers
   before `connect()`. Respect the SDK rate limits (`publishState(s)` 300/min, ≤100 per batch).
+- **Changelog**: when the repo has a `CHANGELOG.md`, a change users can notice (fix, feature,
+  behaviour, requirement) adds a line under `## [Unreleased]` in the same PR, written for users.
+  Never write a version heading: the release workflow turns `[Unreleased]` into the version.
 - **Dates and times** shown to users use the local timezone (`TZ` is injected), not UTC.
 - **Docker image**: built by GitHub Actions, don't build it locally.
 - Start from an up-to-date default branch (`git pull`); it is `main` or `master` depending on the
