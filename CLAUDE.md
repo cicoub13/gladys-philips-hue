@@ -6,7 +6,7 @@ contract is https://gladysassistant.com/fr/docs/dev/external-integrations/: fetc
 trusting memory, the SDK is still 0.x.
 
 Sibling integrations are cloned next to this repo (`../gladys-*`, list in
-`../integration-kit/repos.txt`). When one already solves a problem (timeouts, error
+`../gladys-integration-kit/repos.txt`). When one already solves a problem (timeouts, error
 classification, token storage, fake Gladys test helper…), reuse its pattern.
 
 ## Layout
@@ -32,8 +32,8 @@ All three must pass before committing: CI runs them, plus a coverage threshold w
 
 - **Files owned by the integration-kit**: `.github/workflows/{ci,build,release,dependency-review}.yml`,
   `.github/dependabot.yml`, `SECURITY.md` and this `CLAUDE.md`. Never edit them here: change
-  `../integration-kit/template/` and sync, or the next sync overwrites the change.
-- **SDK upgrades** go through `../integration-kit/scripts/sdk-bump.sh`, not by hand.
+  `../gladys-integration-kit/template/` and sync, or the next sync overwrites the change.
+- **SDK upgrades** go through `../gladys-integration-kit/scripts/sdk-bump.sh`, not by hand.
 - **Backward compatibility**: keep the same `external_id`s, config keys, manifest `config_schema`
   keys and files under `/data`. A changed `external_id` orphans every device users already
   created.
