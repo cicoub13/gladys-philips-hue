@@ -5,8 +5,9 @@
 //   - the persistent bridge store (paired bridges + usernames),
 //   - one HueBridgeClient per bridge,
 //   - an in-memory registry mapping each Gladys device external_id to its
-//     bridge + Hue light id (so onSetValue / onPoll can be dispatched),
-//   - the pure mapping helpers (Hue <-> Gladys features).
+//     bridge + Hue light id (so onSetValue can be dispatched),
+//   - the pure mapping helpers (Hue <-> Gladys features),
+//   - its own refresh loop, publishing the light states every `poll_frequency`.
 //
 // The index.js wiring only calls high-level methods here; no protocol detail
 // leaks into the SDK glue.
@@ -36,7 +37,7 @@ const RESYNC_BASE_MS = 5000;
 const RESYNC_MAX_MS = 5 * 60 * 1000;
 
 // A light missing from the registry triggers a full resync, at most this often
-// (a device deleted on the bridge side would otherwise resync on every poll).
+// (a device deleted on the bridge side would otherwise resync on every command).
 const REFRESH_MIN_INTERVAL_MS = 30000;
 
 const NO_BRIDGE_MESSAGE = {
@@ -97,6 +98,13 @@ export class HueManager {
     this.refreshing = undefined;
     this.lastRefreshAt = 0;
     this.stopped = false;
+    // The light state refresh loop (startPolling / stopPolling).
+    this.polling = false;
+    this.pollTimer = undefined;
+    this.pollRun = undefined;
+    // Bumped on every command a bridge accepted: a refresh that read the lights
+    // before it must not publish their old state (see refreshLights).
+    this.commandSeq = 0;
   }
 
   /**
@@ -113,7 +121,11 @@ export class HueManager {
    * @param {{ bridge_ip: string, poll_frequency: number }} config - Normalized config.
    */
   setConfig(config) {
+    const frequencyChanged = config.poll_frequency !== this.config.poll_frequency;
     this.config = config;
+    if (frequencyChanged && this.polling) {
+      this.armPoll();
+    }
   }
 
   /**
@@ -136,7 +148,7 @@ export class HueManager {
    * and (re)populate the dispatch registry.
    *
    * A bridge we failed to read keeps its previous registry entries: losing them
-   * would break every command and poll of its lights with a misleading "unknown
+   * would break every command and refresh of its lights with a misleading "unknown
    * device" until the next successful scan.
    * @returns {Promise<{ devices: Array<object>, reachable: number, unreachable: number }>} Scan result.
    */
@@ -179,17 +191,17 @@ export class HueManager {
         // `platformKey` keeps the IP-based ids of bridges paired without an id.
         const platformId = `${bridge.platformKey || bridge.id || bridge.ip}-${light.uniqueid || hueId}`;
         const ids = this.gladys.externalIds(DEVICE_TYPE, platformId);
-        const payload = lightToDevicePayload(ids, light);
-        payload.poll_frequency = this.config.poll_frequency;
-        devices.push(payload);
+        devices.push(lightToDevicePayload(ids, light));
         nextRegistry.set(ids.device, {
           platformId,
           hueId,
           bridgeIp: bridge.ip,
           light,
           // Last value published per feature, to avoid re-publishing unchanged
-          // states on every poll (Gladys caps at 300 states/minute).
+          // states on every refresh (Gladys caps at 300 states/minute).
           lastValues: new Map(),
+          // commandSeq of the last command the bridge accepted for this light.
+          commandSeq: 0,
         });
       }
     }
@@ -287,7 +299,7 @@ export class HueManager {
   }
 
   /**
-   * Record whether a bridge answered a poll or command, and update the status
+   * Record whether a bridge answered a refresh or command, and update the status
    * and the resync loop accordingly. Never throws: the caller's own outcome is
    * what Gladys must see.
    * @param {string} ip - Bridge address.
@@ -369,6 +381,76 @@ export class HueManager {
     this.stopped = true;
     clearTimeout(this.resyncTimer);
     this.resyncTimer = undefined;
+    this.stopPolling();
+  }
+
+  /**
+   * Refresh the light states every `poll_frequency`, on our own timer: Gladys
+   * only polls a device created with `should_poll`, which the lights never had,
+   * and never updates it on a device already created. Call once connected.
+   */
+  startPolling() {
+    this.polling = true;
+    this.armPoll();
+  }
+
+  /**
+   * Stop the refresh loop (disconnection, shutdown). A refresh in progress ends
+   * normally but does not arm the next one.
+   */
+  stopPolling() {
+    this.polling = false;
+    clearTimeout(this.pollTimer);
+    this.pollTimer = undefined;
+  }
+
+  /**
+   * (Re)arm the next refresh, `poll_frequency` from now. While a refresh runs,
+   * that run arms the next one when it ends: never two at once.
+   */
+  armPoll() {
+    clearTimeout(this.pollTimer);
+    this.pollTimer = undefined;
+    if (!this.polling || this.stopped || this.pollRun) {
+      return;
+    }
+    this.pollTimer = setTimeout(() => this.runPoll(), this.config.poll_frequency);
+    // The Gladys WebSocket keeps the process alive; this timer must not.
+    this.pollTimer.unref();
+  }
+
+  /**
+   * One tick of the refresh loop, then arm the next one.
+   * @returns {Promise<void>} Resolves once done; never rejects (it runs from a timer).
+   */
+  async runPoll() {
+    this.pollTimer = undefined;
+    this.pollRun = this.pollLights().catch((error) => logger.warn(`Light refresh failed: ${error.message}`));
+    await this.pollRun;
+    this.pollRun = undefined;
+    this.armPoll();
+  }
+
+  /**
+   * Publish the state of every light created in Gladys, from ONE read per
+   * bridge (it rate-limits around 10 requests/s), all bridges at once so a hung
+   * one does not delay the others. Lights not created are skipped: Gladys drops
+   * their states but still counts them in its 300 states/minute limit.
+   * @returns {Promise<void>} Resolves once done.
+   */
+  async pollLights() {
+    const created = new Set(this.gladys.devices.map((device) => device.external_id));
+    await Promise.all(
+      this.store.list().map((bridge) => {
+        const hueIds = [];
+        for (const [deviceId, entry] of this.registry) {
+          if (entry.bridgeIp === bridge.ip && created.has(deviceId)) {
+            hueIds.push(entry.hueId);
+          }
+        }
+        return this.refreshLights(bridge.ip, this.clientFor(bridge), hueIds);
+      }),
+    );
   }
 
   /**
@@ -457,6 +539,8 @@ export class HueManager {
     logger.info(`setValue ${feature.external_id} = ${value} -> ${JSON.stringify(hueState)}`);
     // Throws (and fails the command in Gladys) when the bridge refuses it.
     await this.callBridge(entry.bridgeIp, () => client.setLightState(entry.hueId, hueState));
+    this.commandSeq += 1;
+    entry.commandSeq = this.commandSeq;
 
     // Echo the commanded value back so Gladys reflects it immediately, along
     // with the on/off state it implies: setting a colour, a temperature or a
@@ -469,23 +553,9 @@ export class HueManager {
   }
 
   /**
-   * Poll a light and publish its current feature states.
-   * @param {object} device - Gladys device.
-   * @returns {Promise<void>} Resolves once states are published.
-   */
-  async poll(device) {
-    await this.ensureRegistered(device);
-    const { entry, client } = this.resolve(device);
-    const light = await this.callBridge(entry.bridgeIp, () => client.getLight(entry.hueId));
-    entry.light = light; // refresh cached capabilities/state
-    const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
-    await this.publishChangedStates(entry, hueStateToFeatureStates(ids, light));
-  }
-
-  /**
    * Recall a Hue scene by name (the `activate_scene` scene action), then
    * refresh the lights it set so Gladys shows them without waiting for the
-   * next poll.
+   * next refresh.
    * @param {{ scene?: string, room?: string }} fields - Resolved fields of the scene action.
    * @returns {Promise<void>} Resolves once the bridge accepted the scene.
    * @throws {Error} When no scene, or more than one, matches, or the bridge refuses.
@@ -532,6 +602,13 @@ export class HueManager {
     const client = this.clientFor(bridges.find((b) => b.ip === match.bridgeIp));
     logger.info(`Recalling Hue scene "${match.sceneName}" (${match.roomName || 'all lights'}) on ${match.bridgeIp}`);
     await this.callBridge(match.bridgeIp, () => client.recallScene(match.groupId, match.sceneId));
+    // Like a command: a refresh already reading these lights must not undo it.
+    this.commandSeq += 1;
+    for (const entry of this.registry.values()) {
+      if (entry.bridgeIp === match.bridgeIp && match.lights.includes(entry.hueId)) {
+        entry.commandSeq = this.commandSeq;
+      }
+    }
     // Not awaited: the scene is on, a slow refresh must not delay the ack past
     // the action's timeout and turn it into a failure.
     this.refreshLights(match.bridgeIp, client, match.lights);
@@ -540,7 +617,12 @@ export class HueManager {
   /**
    * Publish the new state of the known lights among the given ones, from ONE
    * read of the bridge (not one per light, which would burst its rate limit).
-   * Best-effort, never rejects: the command it follows already succeeded.
+   * Best-effort, never rejects: the scene it follows already succeeded, and the
+   * refresh loop retries on its next tick.
+   *
+   * A light commanded while the read was in flight is skipped: the bridge may
+   * have answered with its state from before the command, which would flip
+   * Gladys back after the command's echo. The next refresh catches up.
    * @param {string} bridgeIp - Bridge the lights belong to.
    * @param {HueBridgeClient} client - Client of that bridge.
    * @param {string[]} hueIds - Hue ids of the lights.
@@ -553,18 +635,19 @@ export class HueManager {
     if (entries.length === 0) {
       return;
     }
+    const readSeq = this.commandSeq;
     try {
       const lights = await this.callBridge(bridgeIp, () => client.getLights());
       for (const entry of entries) {
         const light = lights[entry.hueId];
-        if (light) {
+        if (light && entry.commandSeq <= readSeq) {
           entry.light = light; // refresh cached capabilities/state
           const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
           await this.publishChangedStates(entry, hueStateToFeatureStates(ids, light));
         }
       }
     } catch (error) {
-      logger.warn(`Could not refresh the lights of bridge ${bridgeIp} after the scene: ${error.message}`);
+      logger.warn(`Could not refresh the lights of bridge ${bridgeIp}: ${error.message}`);
     }
   }
 

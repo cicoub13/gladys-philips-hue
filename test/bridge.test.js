@@ -121,7 +121,7 @@ test('a bridge overloaded with 503 is retried', async () => {
 
 test('a business error is never retried', async () => {
   const { calls } = mockFetch([{ body: [{ error: { type: 3, description: 'resource not available' } }] }]);
-  await assert.rejects(() => new HueBridgeClient('192.168.1.10', USERNAME).getLight('99'));
+  await assert.rejects(() => new HueBridgeClient('192.168.1.10', USERNAME).getLights());
   assert.equal(calls.length, 1, 'retrying would fail identically');
 });
 

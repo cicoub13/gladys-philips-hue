@@ -15,8 +15,10 @@ Each Hue light is exposed as a Gladys device with the features it supports:
 | Color light             |   ✅   |     ✅     |  ✅   |                   |
 | Extended color light    |   ✅   |     ✅     |  ✅   |        ✅         |
 
-States are refreshed by polling at the interval you choose in **Refresh
-interval** (default: every minute).
+The integration reads your bridge at the interval you choose in **Refresh
+interval** (default: every minute): changes made outside Gladys — Hue app, wall
+switch, dimmer, Hue automations — show up in Gladys within that interval.
+Changes made from Gladys show up right away.
 
 ## Hue scenes in Gladys scenes
 

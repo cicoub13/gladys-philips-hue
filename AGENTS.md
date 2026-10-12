@@ -5,13 +5,20 @@ Project-specific notes. Generic rules (SDK contract, commands, kit-owned files, 
 
 ## Architecture / data flow
 
-- `index.js` only wires SDK events to `HueManager`: `onScanRequest`/`connected`/`onConfigUpdated` →
-  `syncDevices()`, `onSetValue` → `setValue()`, `onPoll` → `poll()`, `onAction('discover_bridges'|'pair_bridge')`
+- `index.js` only wires SDK events to `HueManager`: `onScanRequest`/`connected` → `syncDevices()`,
+  `connected` → `startPolling()`, `disconnected` → `stopPolling()`, `onConfigUpdated` → `setConfig()`,
+  `onSetValue` → `setValue()`, `onAction('discover_bridges'|'pair_bridge')`
   → `src/actions.js`, `onSceneAction('activate_scene')` → `activateScene()`. A failed initial `connect()`
   is logged, not fatal (Gladys refuses the token transiently while booting; the SDK retries).
   `unhandledRejection` exits the process on purpose.
 - `src/manager.js` holds the in-memory **registry** `device external_id → { platformId, hueId, bridgeIp,
-light, lastValues }`, rebuilt by `buildDiscoveredDevices()`. `setValue`/`poll` resolve through it.
+light, lastValues, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves through it.
+- No `onPoll`: Gladys only polls devices with `should_poll`, never set on the lights and never updated on
+  devices already created. The manager refreshes on its own `setTimeout` chain (`startPolling` /
+  `armPoll` / `runPoll`, never two runs at once, re-armed by `setConfig` when `poll_frequency` changes):
+  one `getLights()` per bridge through `refreshLights()`, only for lights in `gladys.devices` (created).
+  `refreshLights` skips a light whose `commandSeq` (set after an accepted command or scene recall) is newer
+  than the read, so a stale read never flips Gladys back after the echo.
 - `src/hue/`: `bridge.js` (v1 REST client), `https.js` (`node:https` transport + TLS pinning),
   `identify.js` (proves a candidate is a bridge), `discovery.js`, `mapping.js` and `scenes.js` (pure),
   `store.js` (`/data/bridges.json`).
@@ -39,8 +46,8 @@ light, lastValues }`, rebuilt by `buildDiscoveredDevices()`. `setValue`/`poll` r
   (TXT `bridgeid` or name matching /hue/) → N-UPnP cloud `https://discovery.meethue.com/`. Results
   cached 10 s (`SCAN_CACHE_MS`) because the core allows one mediated scan per 10 s (else 429);
   tests must call `resetDiscoveryCache()`.
-- Polling only (no push/event stream). The bridge rate-limits ~10 req/s: scene refresh does one
-  `getLights()`, not one call per light.
+- Polling only (no push/event stream). The bridge rate-limits ~10 req/s: the refresh loop and the
+  scene refresh do one `getLights()` per bridge, not one call per light.
 
 ## Devices and external_ids (must stay stable)
 
@@ -60,8 +67,9 @@ light, lastValues }`, rebuilt by `buildDiscoveredDevices()`. `setValue`/`poll` r
 
 - Config keys: `bridge_ip` (validated IPv4/hostname; invalid input is moved to derived
   `bridge_ip_rejected` and shown by the actions), `poll_frequency` (ms, must be in
-  `POLL_FREQUENCIES` = 10000/15000/30000/60000 — Gladys' DB enum; 1 s/2 s deliberately excluded).
-  `DEFAULT_CONFIG` must match manifest defaults. `poll_frequency` is set on each published device.
+  `POLL_FREQUENCIES` = 10000/15000/30000/60000; nothing below 10 s for the bridge rate limit).
+  `DEFAULT_CONFIG` must match manifest defaults. `poll_frequency` is the interval of the manager's own
+  refresh loop; it is NOT set on the published devices (Gladys never polled them).
 - `/data/bridges.json` (override dir with `HUE_DATA_DIR`): `{ bridges: [{ id, ip, username, scheme?,
 certFingerprint?, platformKey? }] }`. Atomic write via `.tmp` + rename; a failed write keeps the
   pairing in memory and sets `store.persistError` (surfaced by `pairBridgeAction`).
@@ -71,7 +79,7 @@ certFingerprint?, platformKey? }] }`. Atomic write via `.tmp` + rename; a failed
 - Unreachable bridges keep their old registry entries; if none is reachable, `syncDevices` does NOT
   publish (an empty list would wipe the Discovery tab).
 - Single background resync while a bridge is down: backoff 5 s → 5 min with jitter, `unref()`ed,
-  cleared by `stop()`. Unknown device on poll/command triggers a shared resync at most every 30 s.
+  cleared by `stop()`. Unknown device on command triggers a shared resync at most every 30 s.
 - Connection status is recomputed from `unreachable` and sent only when it changes.
 - Bridges are addressed by their stored `ip` (registry entries and `unreachable` hold `bridgeIp`);
   nothing re-discovers a moved bridge automatically, re-pairing updates the ip (`upsert` keyed by id).
@@ -81,7 +89,8 @@ certFingerprint?, platformKey? }] }`. Atomic write via `.tmp` + rename; a failed
 - `node:test`, all in `test/`. No `test/manifest.test.js`. Extra script: `npm run test:coverage`.
 - `test/manager.test.js`: hand-written fake Gladys (`makeGladys()`: `externalIds` returning
   `ext:test:<type>:<platformId>`, records states/devices/status) and fake client injected via
-  `manager.clientFor = () => client`; stores in `fs.mkdtemp` dirs.
+  `manager.clientFor = () => client`; stores in `fs.mkdtemp` dirs. Refresh loop tests use
+  `t.mock.timers.enable({ apis: ['setTimeout'] })` then `settle()` (one `setImmediate`).
 - HTTP is mocked with `mock.method(global, 'fetch', ...)`; `https.test.js` uses a real local
   `http.createServer`; `index.test.js` spawns `index.js` against a `ws` WebSocketServer closing with 4000.
 - Keep tests portable: a hardcoded `/proc` path once made the suite hang on Linux only (7c8f10e);

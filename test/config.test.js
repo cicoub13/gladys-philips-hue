@@ -8,9 +8,8 @@ test('normalizeConfig returns defaults when empty', () => {
   assert.equal(config.poll_frequency, DEFAULT_CONFIG.poll_frequency);
 });
 
-test('every default and option is a poll frequency Gladys accepts', () => {
-  // Gladys stores poll_frequency in an ENUM column, in milliseconds: any other
-  // value is rejected by the database and the device is never polled.
+test('the default refresh interval is one of the options, none too aggressive', () => {
+  // In milliseconds, the values the manifest select stores.
   assert.ok(POLL_FREQUENCIES.includes(DEFAULT_CONFIG.poll_frequency));
   POLL_FREQUENCIES.forEach((frequency) => {
     assert.ok(frequency >= 10000, `${frequency} ms is too aggressive for a Hue bridge`);

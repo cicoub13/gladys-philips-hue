@@ -226,16 +226,6 @@ export class HueBridgeClient {
   }
 
   /**
-   * Fetch a single light by its bridge id.
-   * @param {string} id - Light id on the bridge.
-   * @returns {Promise<object>} The light object.
-   */
-  async getLight(id) {
-    this.assertUsername();
-    return this.request(`/api/${this.username}/lights/${id}`);
-  }
-
-  /**
    * Update the state of a light (on/off, brightness, color...).
    * @param {string} id - Light id on the bridge.
    * @param {object} state - Hue state payload, e.g. `{ on: true, bri: 254 }`.
