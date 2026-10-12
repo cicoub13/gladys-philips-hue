@@ -19,7 +19,7 @@
 // Docs: https://developers.meethue.com/develop/get-started-2/ (discovery)
 // -----------------------------------------------------------------------------
 
-import { createLogger } from '@gladysassistant/integration-sdk';
+import { createLogger, parseMdnsTxt } from '@gladysassistant/integration-sdk';
 
 const logger = createLogger({ name: 'hue-discovery' });
 
@@ -35,14 +35,23 @@ const SCAN_CACHE_MS = 10000;
 let scanCache = { at: 0, bridges: [] };
 
 /**
- * Read a header from an SSDP response, whatever its casing.
- * @param {Record<string, string>} headers - Raw SSDP headers.
- * @param {string} name - Header name, lowercase.
- * @returns {string} Header value, or an empty string.
+ * Parse the raw text of an SSDP response (`HTTP/1.1 200 OK` then `Name: value`
+ * lines, CRLF or LF) into its headers. Header names are case-insensitive, so
+ * they are lowercased; the first occurrence of a header wins.
+ * @param {string} text - Raw SSDP response.
+ * @returns {Map<string, string>} Lowercased header name → trimmed value.
  */
-function header(headers, name) {
-  const key = Object.keys(headers).find((candidate) => candidate.toLowerCase() === name);
-  return key ? String(headers[key]) : '';
+function parseSsdpHeaders(text) {
+  const headers = new Map();
+  for (const line of text.split('\n')) {
+    // The status line has no colon; a value may contain some (LOCATION URL).
+    const separator = line.indexOf(':');
+    const name = separator > 0 ? line.slice(0, separator).trim().toLowerCase() : '';
+    if (name && !headers.has(name)) {
+      headers.set(name, line.slice(separator + 1).trim());
+    }
+  }
+  return headers;
 }
 
 /**
@@ -60,17 +69,27 @@ function hostFromLocation(location) {
 
 /**
  * Keep only the Hue bridges of an SSDP scan result.
- * @param {Array<Record<string, string>>} responders - Raw SSDP responders.
+ *
+ * The core relays each responder as `{ source_ip, source_port, headers }`,
+ * where `headers` is the raw response text: parsing it is our job.
+ * @param {Array<{ source_ip?: string, headers?: string }>} responders - Raw SSDP responders.
  * @returns {Array<{ id: string, ip: string }>} Hue bridges.
  */
 export function parseSsdpResults(responders) {
   return (Array.isArray(responders) ? responders : [])
-    .map((headers) => ({
-      // Only a Hue bridge advertises `hue-bridgeid`; without it we would offer
-      // every UPnP device on the network as a candidate.
-      id: header(headers, 'hue-bridgeid').toLowerCase(),
-      ip: hostFromLocation(header(headers, 'location')),
-    }))
+    .filter((responder) => responder && typeof responder.headers === 'string')
+    .map((responder) => {
+      const headers = parseSsdpHeaders(responder.headers);
+      return {
+        // Only a Hue bridge advertises `hue-bridgeid`; without it we would offer
+        // every UPnP device on the network as a candidate. Lowercased like the
+        // `bridgeid` of /api/config, which is the id the bridge is stored under.
+        id: (headers.get('hue-bridgeid') || '').toLowerCase(),
+        ip:
+          hostFromLocation(headers.get('location') || '') ||
+          (typeof responder.source_ip === 'string' ? responder.source_ip : ''),
+      };
+    })
     .filter((bridge) => bridge.id && bridge.ip);
 }
 
@@ -80,21 +99,27 @@ export function parseSsdpResults(responders) {
  * An mDNS browse is noisy — printers, speakers and everything else that
  * announces itself can come back. Requiring evidence of Hue here (and not just
  * an IP) is what stops the rest of the network from being offered as bridges.
- * The SDK hands us `[{ name, host, addresses, port, txt }]`.
- * @param {Array<{ name?: string, addresses?: string[], txt?: Record<string, string> }>} services - Browsed services.
+ * The SDK hands us `[{ name, host, addresses, port, txt }]`, `txt` being the
+ * raw `key=value` entries of the TXT record.
+ * @param {Array<{ name?: string, addresses?: string[], txt?: string[] }>} services - Browsed services.
  * @returns {Array<{ id: string, ip: string }>} Hue bridges.
  */
 export function parseMdnsResults(services) {
   return (Array.isArray(services) ? services : [])
-    .map((service) => ({
-      // A Hue bridge publishes its id in the TXT record.
-      id: String((service.txt && (service.txt.bridgeid || service.txt.bridgeId)) || '').toLowerCase(),
-      // Fallback for firmwares that omit the TXT record: the service instance
-      // name still carries `_hue._tcp` / "Philips Hue".
-      hue: /hue/i.test(String(service.name || '')),
-      // IPv4 first: the bridge v1 API is plain HTTP on an IPv4 address.
-      ip: (service.addresses || []).find((address) => address.includes('.')) || '',
-    }))
+    .filter((service) => service && typeof service === 'object')
+    .map((service) => {
+      // A Hue bridge publishes its id in the TXT record (`bridgeid=…`);
+      // parseMdnsTxt lowercases the keys. A bare `bridgeid` entry is `true`.
+      const { bridgeid } = parseMdnsTxt(service.txt);
+      return {
+        id: typeof bridgeid === 'string' ? bridgeid.trim().toLowerCase() : '',
+        // Fallback for firmwares that omit the TXT record: the service instance
+        // name still carries `_hue._tcp` / "Philips Hue".
+        hue: /hue/i.test(String(service.name || '')),
+        // IPv4 first: the bridge v1 API is plain HTTP on an IPv4 address.
+        ip: (service.addresses || []).find((address) => address.includes('.')) || '',
+      };
+    })
     .filter((bridge) => bridge.ip && (bridge.id || bridge.hue))
     .map(({ id, ip }) => ({ id, ip }));
 }

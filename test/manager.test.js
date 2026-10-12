@@ -367,12 +367,19 @@ test('a legacy bridge learns its id, so a later IP change keeps its external_ids
   assert.deepEqual([...manager.registry.keys()], before);
 });
 
+// A Hue bridge answering the SSDP scan, as the core relays it (raw response text).
+const HUE_SSDP_RESPONDER = {
+  source_ip: '192.168.1.42',
+  source_port: 1900,
+  headers:
+    'HTTP/1.1 200 OK\r\nLOCATION: http://192.168.1.42:80/description.xml\r\n' +
+    'hue-bridgeid: 001788FFFE23BFC2\r\nST: urn:schemas-upnp-org:device:basic:1\r\n\r\n',
+};
+
 test('candidateBridges merges the discovered bridges with the manual address', async () => {
   const { manager } = await makeManager();
   manager.config = { ...DEFAULT_CONFIG, bridge_ip: '10.0.0.5' };
-  manager.gladys.scanNetwork = async () => [
-    { LOCATION: 'http://192.168.1.42:80/description.xml', 'hue-bridgeid': 'ABC' },
-  ];
+  manager.gladys.scanNetwork = async () => [HUE_SSDP_RESPONDER];
   resetDiscoveryCache();
 
   const candidates = await manager.candidateBridges();
@@ -382,9 +389,7 @@ test('candidateBridges merges the discovered bridges with the manual address', a
 test('candidateBridges does not duplicate a manual address already discovered', async () => {
   const { manager } = await makeManager();
   manager.config = { ...DEFAULT_CONFIG, bridge_ip: '192.168.1.42' };
-  manager.gladys.scanNetwork = async () => [
-    { LOCATION: 'http://192.168.1.42:80/description.xml', 'hue-bridgeid': 'ABC' },
-  ];
+  manager.gladys.scanNetwork = async () => [HUE_SSDP_RESPONDER];
   resetDiscoveryCache();
 
   assert.equal((await manager.candidateBridges()).length, 1);
