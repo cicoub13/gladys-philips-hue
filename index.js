@@ -45,6 +45,11 @@ gladys.onSetValue(async (device, feature, value) => {
   await manager.setValue(device, feature, value);
 });
 
+// --- Polling: a no-op, the manager's own loop refreshes the lights ----------
+// Lights created before that loop still carry a poll_frequency. Should a
+// Gladys version start polling them, ack instead of answering "not implemented".
+gladys.onPoll(() => {});
+
 // --- Manifest actions (Configuration screen buttons) -------------------------
 gladys.onAction('discover_bridges', () => {
   logger.info('Action discover_bridges');
