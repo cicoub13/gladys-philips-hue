@@ -7,11 +7,13 @@ trusting memory, the SDK is still 0.x.
 
 Sibling integrations are cloned next to this repo (`../gladys-*`, list in
 `../gladys-integration-kit/repos.txt`). When one already solves a problem (timeouts, error
-classification, token storage, fake Gladys test helper…), reuse its pattern.
+classification, token storage…), reuse its pattern. When the SDK solves it, use the SDK instead.
 
 ## Layout
 
-- `index.js`: entry point. `src/`: code. `test/`: `node --test` tests.
+- `index.js`: entry point. `src/`: code. `test/`: `node --test` tests. They talk to the SDK's fake
+  Gladys (`createFakeGladys` from `@gladysassistant/integration-sdk/testing`), not to a
+  hand-written stand-in: it rejects the payloads the real Gladys rejects.
 - `gladys-assistant-integration.json`: the manifest (`config_schema`, widgets, scene triggers and
   actions…).
 - `docs/en.md` and `docs/fr.md`: user docs, keep both in sync. README screenshots go in
@@ -38,8 +40,13 @@ All three must pass before committing: CI runs them, plus a coverage threshold w
   keys and files under `/data`. A changed `external_id` orphans every device users already
   created.
 - **Runtime**: read-only root FS (only `/data` is writable), 256 MB RAM, bridge network (no
-  broadcast or mDNS: use `scanNetwork()` and manifest `network_discovery`). Register handlers
-  before `connect()`. Respect the SDK rate limits (`publishState(s)` 300/min, ≤100 per batch).
+  broadcast or mDNS: use `scanNetwork()` and manifest `network_discovery`, and `parseMdnsTxt()`
+  for TXT records). Register handlers before `connect()`. Respect the SDK rate limits
+  (`publishState(s)` 300/min, ≤100 per batch): `publishChangedStates()` skips unchanged values
+  and splits the batches.
+- **Polling**: `poll_frequency` is in milliseconds and must be one of `DEVICE_POLL_FREQUENCIES`
+  (1 s to 1 min, anything else is a 400), and Gladys polls a device only with
+  `should_poll: true`. Neither is updated on a device already created.
 - **Changelog**: when the repo has a `CHANGELOG.md`, a change users can notice (fix, feature,
   behaviour, requirement) adds a line under `## [Unreleased]` in the same PR, written for users.
   Never write a version heading: the release workflow turns `[Unreleased]` into the version.
