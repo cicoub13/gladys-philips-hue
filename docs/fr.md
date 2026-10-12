@@ -16,8 +16,11 @@ qu'elle prend en charge :
 | Color light             |      ✅      |     ✅     |   ✅    |                      |
 | Extended color light    |      ✅      |     ✅     |   ✅    |          ✅          |
 
-Les états sont rafraîchis par interrogation à l'intervalle choisi dans
-**Intervalle de rafraîchissement** (toutes les minutes par défaut).
+L'intégration interroge votre bridge à l'intervalle choisi dans **Intervalle de
+rafraîchissement** (toutes les minutes par défaut) : les changements faits hors
+de Gladys — application Hue, interrupteur mural, variateur, automatisations Hue
+— apparaissent dans Gladys dans cet intervalle. Ceux faits depuis Gladys
+apparaissent immédiatement.
 
 ## Scènes Hue dans les scènes Gladys
 

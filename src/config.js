@@ -10,13 +10,13 @@
 // (a `select` field always sends its value back as a string).
 // -----------------------------------------------------------------------------
 
-// Poll frequencies Gladys accepts, in MILLISECONDS: `t_device.poll_frequency` is
-// an ENUM column (DEVICE_POLL_FREQUENCIES_LIST), so any other value is rejected
-// by the database and the device is never polled.
+// Light refresh intervals, in MILLISECONDS: the values the manifest
+// `poll_frequency` select stores, kept as they are for existing configs. The
+// integration refreshes on its own timer (HueManager.startPolling), with one
+// read per bridge per interval.
 //
-// Gladys also allows 1 s and 2 s, deliberately NOT exposed here: a Hue bridge
-// rate-limits around 10 requests/s and Gladys caps an integration at 300 states
-// per minute, both of which a 1 s poll over a handful of lights blows through.
+// Nothing below 10 s on purpose: a Hue bridge rate-limits around 10 requests/s
+// and Gladys caps an integration at 300 states per minute.
 export const POLL_FREQUENCIES = [10000, 15000, 30000, 60000];
 
 // Defaults MUST stay consistent with the `default` values of the manifest.

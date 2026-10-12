@@ -14,6 +14,8 @@ function makeGladys() {
   const recorded = { states: [], discovered: null, connectionStatus: [] };
   return {
     recorded,
+    // The devices the user created (the SDK keeps this list up to date).
+    devices: [],
     externalIds(type, platformId) {
       const base = `ext:test:${type}:${platformId}`;
       return { device: base, feature: (key) => `${base}:${key}` };
@@ -49,12 +51,6 @@ function makeFakeClient() {
       }
       return { 3: light };
     },
-    async getLight() {
-      if (this.down) {
-        throw new Error('connect EHOSTUNREACH');
-      }
-      return light;
-    },
     async setLightState(id, state) {
       this.lastSetState = { id, state };
       Object.assign(light.state, state);
@@ -86,6 +82,38 @@ async function firstDeviceId(manager) {
   return [...manager.registry.keys()][0];
 }
 
+/**
+ * Register the lights and create every one of them in Gladys, as the user
+ * would from the Discovery tab.
+ * @param {HueManager} manager - Manager under test.
+ * @param {object} gladys - Its fake Gladys.
+ * @returns {Promise<string>} External id of the first device.
+ */
+async function createAll(manager, gladys) {
+  await manager.buildDiscoveredDevices();
+  gladys.devices = [...manager.registry.keys()].map((externalId) => ({ external_id: externalId }));
+  return gladys.devices[0].external_id;
+}
+
+/**
+ * Count the getLights() calls of a fake client.
+ * @param {object} client - Fake bridge client.
+ * @returns {{ count: number }} Live counter.
+ */
+function countReads(client) {
+  const reads = { count: 0 };
+  const getLights = client.getLights;
+  client.getLights = function () {
+    reads.count += 1;
+    return getLights.call(this);
+  };
+  return reads;
+}
+
+// Let the refresh started by a mocked timer run to its end (the fakes only
+// chain promises, no real I/O).
+const settle = () => new Promise(setImmediate);
+
 test('buildDiscoveredDevices maps bridge lights to Gladys devices', async () => {
   const { manager } = await makeManager();
   const { devices, reachable, unreachable } = await manager.buildDiscoveredDevices();
@@ -97,12 +125,19 @@ test('buildDiscoveredDevices maps bridge lights to Gladys devices', async () => 
   assert.equal(manager.registry.size, 1);
 });
 
-test('the published poll_frequency is one Gladys accepts', async () => {
+test('the discovered lights do not ask Gladys to poll them, and keep their ids', async () => {
+  // The integration refreshes the lights itself: Gladys never polled them (no
+  // should_poll), so poll_frequency was a dead field.
   const { manager } = await makeManager();
   const { devices } = await manager.buildDiscoveredDevices();
-  // Milliseconds, from the DEVICE_POLL_FREQUENCIES enum — 60 (seconds) would be
-  // rejected by the database and the light would never be polled.
-  assert.equal(devices[0].poll_frequency, 60000);
+  assert.equal('poll_frequency' in devices[0], false);
+  assert.equal('should_poll' in devices[0], false);
+  // Unchanged external_ids and features: the devices already created keep working.
+  assert.equal(devices[0].external_id, SALON_ID);
+  assert.deepEqual(
+    devices[0].features.map((feature) => feature.external_id),
+    ['on-off', 'brightness', 'color', 'temperature'].map((key) => `${SALON_ID}:${key}`),
+  );
 });
 
 test('setValue sends the right Hue state and echoes it', async () => {
@@ -139,41 +174,74 @@ test('setValue rejects a feature that does not belong to the light', async () =>
   );
 });
 
-test('poll publishes the current light states', async () => {
+test('a refresh publishes the current state of the created lights', async () => {
   const { manager, gladys } = await makeManager();
-  const deviceId = await firstDeviceId(manager);
+  const deviceId = await createAll(manager, gladys);
 
-  await manager.poll({ external_id: deviceId });
+  await manager.pollLights();
   const ids = gladys.externalIds('light', manager.registry.get(deviceId).platformId);
   const onOff = gladys.recorded.states.find((s) => s.device_feature_external_id === ids.feature(FEATURE.ON_OFF));
   assert.ok(onOff, 'on/off state published');
   assert.equal(onOff.state, 0);
 });
 
-test('poll does not republish states that did not change', async () => {
+test('a refresh does not republish states that did not change', async () => {
   const { manager, gladys } = await makeManager();
-  const deviceId = await firstDeviceId(manager);
+  await createAll(manager, gladys);
 
-  await manager.poll({ external_id: deviceId });
-  const afterFirstPoll = gladys.recorded.states.length;
-  assert.ok(afterFirstPoll > 0);
+  await manager.pollLights();
+  const afterFirstRefresh = gladys.recorded.states.length;
+  assert.ok(afterFirstRefresh > 0);
 
   // Gladys caps an integration at 300 states per minute: an unchanged light
   // must cost nothing.
-  await manager.poll({ external_id: deviceId });
-  assert.equal(gladys.recorded.states.length, afterFirstPoll);
+  await manager.pollLights();
+  assert.equal(gladys.recorded.states.length, afterFirstRefresh);
 });
 
-test('poll publishes again once a value really changed', async () => {
+test('a refresh publishes again once a value really changed (Hue app, wall switch...)', async () => {
   const { manager, gladys, client } = await makeManager();
-  const deviceId = await firstDeviceId(manager);
+  await createAll(manager, gladys);
 
-  await manager.poll({ external_id: deviceId });
-  const afterFirstPoll = gladys.recorded.states.length;
+  await manager.pollLights();
+  const afterFirstRefresh = gladys.recorded.states.length;
 
   client.light.state.on = true;
-  await manager.poll({ external_id: deviceId });
-  assert.ok(gladys.recorded.states.length > afterFirstPoll);
+  await manager.pollLights();
+  assert.deepEqual(gladys.recorded.states.slice(afterFirstRefresh), [
+    { device_feature_external_id: `${SALON_ID}:on-off`, state: 1 },
+  ]);
+});
+
+test('a refresh neither reads nor publishes the lights not created in Gladys', async () => {
+  // Gladys drops their states but counts them in its 300 states/minute limit.
+  const { manager, gladys, client } = await makeManager();
+  await manager.buildDiscoveredDevices();
+  const reads = countReads(client);
+  await manager.pollLights();
+  assert.equal(reads.count, 0);
+  assert.equal(gladys.recorded.states.length, 0);
+});
+
+test('a refresh that read a light before a command does not flip it back', async () => {
+  const { manager, gladys, client } = await makeManager();
+  await createAll(manager, gladys);
+  await manager.pollLights(); // on-off = 0 published
+
+  // The bridge answers the refresh with the state from before the command.
+  let answer;
+  client.getLights = () =>
+    new Promise((resolve) => {
+      answer = resolve;
+    });
+  const stale = { ...client.light, state: { ...client.light.state } };
+  const refresh = manager.pollLights();
+  await manager.setValue({ external_id: SALON_ID }, { external_id: `${SALON_ID}:on-off` }, 1);
+  answer({ 3: stale });
+  await refresh;
+
+  const onOff = gladys.recorded.states.filter((s) => s.device_feature_external_id === `${SALON_ID}:on-off`);
+  assert.equal(onOff.at(-1).state, 1, 'the command echo stays the last word');
 });
 
 test('resolve throws a helpful error for an unknown device', async () => {
@@ -194,7 +262,7 @@ test('an unreachable bridge keeps its lights dispatchable', async () => {
   const deviceId = await firstDeviceId(manager);
 
   // A network glitch on the next scan must not wipe the registry: every command
-  // and poll would then fail with a misleading "unknown light".
+  // would then fail with a misleading "unknown light".
   client.down = true;
   const { devices, reachable, unreachable } = await manager.buildDiscoveredDevices();
   assert.equal(devices.length, 0);
@@ -203,7 +271,9 @@ test('an unreachable bridge keeps its lights dispatchable', async () => {
   assert.equal(manager.registry.size, 1);
 
   client.down = false;
-  await assert.doesNotReject(() => manager.poll({ external_id: deviceId }));
+  await assert.doesNotReject(() =>
+    manager.setValue({ external_id: deviceId }, { external_id: `${deviceId}:on-off` }, 1),
+  );
 });
 
 test('syncDevices does not wipe the published devices when every bridge is down', async () => {
@@ -430,7 +500,7 @@ const SALON_ID = 'ext:test:light:b1-00:17:88:01:aa';
 
 test('a bridge down at startup: its lights work as soon as it answers, without a manual scan', async () => {
   // After a power cut the container starts before the bridge. The registry
-  // stayed empty and every poll/command failed with "unknown light, run a scan"
+  // stayed empty and every command failed with "unknown light, run a scan"
   // until the user clicked something.
   const { manager, gladys, client } = await makeManager();
   client.down = true;
@@ -438,8 +508,8 @@ test('a bridge down at startup: its lights work as soon as it answers, without a
   assert.equal(manager.registry.size, 0);
 
   client.down = false;
-  await manager.poll({ external_id: SALON_ID });
-  assert.ok(gladys.recorded.states.length > 0, 'the light was polled');
+  await manager.setValue({ external_id: SALON_ID }, { external_id: `${SALON_ID}:on-off` }, 1);
+  assert.ok(client.lastSetState, 'the light was commanded');
   assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true, 'the status recovered');
   manager.stop();
 });
@@ -448,7 +518,10 @@ test('while its bridge is down, a light says so instead of "run a scan"', async 
   const { manager, client } = await makeManager();
   client.down = true;
   await manager.syncDevices();
-  await assert.rejects(() => manager.poll({ external_id: SALON_ID }), /unreachable/);
+  await assert.rejects(
+    () => manager.setValue({ external_id: SALON_ID }, { external_id: `${SALON_ID}:on-off` }, 1),
+    /unreachable/,
+  );
   manager.stop();
 });
 
@@ -485,21 +558,22 @@ test('the resync backoff grows exponentially, is capped, and is jittered', () =>
   assert.equal(nextResyncDelay(1, 0), 5000, 'never below half the step');
 });
 
-test('the status follows the bridge: false when a poll cannot reach it, true when it answers again', async () => {
+test('the status follows the bridge: false when a refresh cannot reach it, true when it answers again', async () => {
   // The status used to be computed at scan time only: a bridge dying an hour
   // later left "connected" on screen while every command failed.
   const { manager, gladys, client } = await makeManager();
   await manager.syncDevices();
+  await createAll(manager, gladys);
   assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true);
 
   client.down = true;
-  await assert.rejects(() => manager.poll({ external_id: SALON_ID }));
+  await manager.pollLights();
   assert.equal(gladys.recorded.connectionStatus.at(-1).connected, false);
   assert.match(gladys.recorded.connectionStatus.at(-1).message.en, /unreachable/);
   assert.ok(manager.resyncTimer, 'a resync is scheduled');
 
   client.down = false;
-  await manager.poll({ external_id: SALON_ID });
+  await manager.pollLights();
   assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true);
   assert.equal(manager.resyncTimer, undefined);
 });
@@ -507,10 +581,158 @@ test('the status follows the bridge: false when a poll cannot reach it, true whe
 test('the status is only sent when it changes', async () => {
   const { manager, gladys } = await makeManager();
   await manager.syncDevices();
+  await createAll(manager, gladys);
   const sent = gladys.recorded.connectionStatus.length;
-  await manager.poll({ external_id: SALON_ID });
-  await manager.poll({ external_id: SALON_ID });
+  await manager.pollLights();
+  await manager.pollLights();
   assert.equal(gladys.recorded.connectionStatus.length, sent);
+});
+
+/**
+ * A manager with a second bridge (192.168.1.20) and its own light, every
+ * light created in Gladys, and the bridge reads counted.
+ * @returns {Promise<object>} Manager, fake Gladys, both clients and their read counters.
+ */
+async function makeTwoBridges() {
+  const { manager, gladys, client, store } = await makeManager();
+  await store.upsert({ id: 'b2', ip: '192.168.1.20', username: 'user-2' });
+  const other = makeFakeClient();
+  manager.clientFor = (bridge) => (bridge.ip === '192.168.1.20' ? other : client);
+  await createAll(manager, gladys);
+  return { manager, gladys, client, other, reads: countReads(client), otherReads: countReads(other) };
+}
+
+test('the refresh loop reads each bridge once per interval and publishes its lights', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { manager, gladys, reads, otherReads } = await makeTwoBridges();
+  manager.startPolling();
+
+  t.mock.timers.tick(DEFAULT_CONFIG.poll_frequency - 1);
+  await settle();
+  assert.equal(reads.count, 0, 'nothing before the interval');
+
+  t.mock.timers.tick(1);
+  await settle();
+  assert.deepEqual([reads.count, otherReads.count], [1, 1], 'one request per bridge, not one per light');
+  const onOff = gladys.recorded.states.filter((s) => s.device_feature_external_id.endsWith(':on-off'));
+  assert.deepEqual(onOff.map((s) => s.device_feature_external_id).sort(), [
+    `${SALON_ID}:on-off`,
+    'ext:test:light:b2-00:17:88:01:aa:on-off',
+  ]);
+
+  t.mock.timers.tick(DEFAULT_CONFIG.poll_frequency);
+  await settle();
+  assert.deepEqual([reads.count, otherReads.count], [2, 2], 'and again on the next interval');
+  manager.stop();
+});
+
+test('a new refresh interval re-arms the loop', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { manager, reads } = await makeTwoBridges();
+  manager.startPolling(); // every 60 s
+  t.mock.timers.tick(5000);
+
+  manager.setConfig({ ...DEFAULT_CONFIG, poll_frequency: 10000 });
+  t.mock.timers.tick(10000);
+  await settle();
+  assert.equal(reads.count, 1, 'refreshed 10 s after the change, not at the old 60 s');
+
+  t.mock.timers.tick(10000);
+  await settle();
+  assert.equal(reads.count, 2);
+  manager.stop();
+});
+
+test('a refresh slower than the interval never overlaps the next one', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { manager, client, reads } = await makeTwoBridges();
+  let answer;
+  const getLights = client.getLights;
+  client.getLights = function () {
+    getLights.call(this);
+    return new Promise((resolve) => {
+      answer = resolve;
+    });
+  };
+  manager.startPolling();
+
+  t.mock.timers.tick(DEFAULT_CONFIG.poll_frequency);
+  await settle();
+  // A config change while it runs must not start a second loop either.
+  manager.setConfig({ ...DEFAULT_CONFIG, poll_frequency: 10000 });
+  t.mock.timers.tick(DEFAULT_CONFIG.poll_frequency * 3);
+  await settle();
+  assert.equal(reads.count, 1, 'still the first, hung, refresh');
+
+  answer({ 3: client.light });
+  await settle();
+  t.mock.timers.tick(10000);
+  await settle();
+  assert.equal(reads.count, 2, 'the next one is armed once the first ended');
+  manager.stop();
+});
+
+test('an unreachable bridge neither stops the other bridges nor the loop', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { manager, gladys, client, otherReads } = await makeTwoBridges();
+  client.down = true;
+  manager.startPolling();
+
+  t.mock.timers.tick(DEFAULT_CONFIG.poll_frequency);
+  await settle();
+  assert.equal(otherReads.count, 1);
+  assert.ok(
+    gladys.recorded.states.some((s) => s.device_feature_external_id.startsWith('ext:test:light:b2-')),
+    'the lights of the other bridge are published',
+  );
+  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, false);
+
+  // Only the refresh publishes states (the background resync of the bridge,
+  // also due by then, reads it but publishes the device list).
+  client.down = false;
+  t.mock.timers.tick(DEFAULT_CONFIG.poll_frequency);
+  await settle();
+  assert.ok(
+    gladys.recorded.states.some((s) => s.device_feature_external_id === `${SALON_ID}:on-off`),
+    'the loop goes on and picks the bridge up again',
+  );
+  manager.stop();
+});
+
+test('the refresh loop stops on disconnection, and a refresh in progress does not re-arm it', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { manager, client, reads } = await makeTwoBridges();
+  manager.startPolling();
+  manager.stopPolling();
+  assert.equal(manager.pollTimer, undefined, 'no timer left');
+  t.mock.timers.tick(DEFAULT_CONFIG.poll_frequency * 2);
+  await settle();
+  assert.equal(reads.count, 0);
+
+  // Disconnected while a refresh is waiting for the bridge.
+  let answer;
+  client.getLights = () =>
+    new Promise((resolve) => {
+      answer = resolve;
+    });
+  manager.startPolling();
+  t.mock.timers.tick(DEFAULT_CONFIG.poll_frequency);
+  await settle();
+  manager.stopPolling();
+  answer({ 3: client.light });
+  await settle();
+  assert.equal(manager.pollTimer, undefined, 'the refresh in progress did not re-arm');
+});
+
+test('stop() (shutdown) also stops the refresh loop', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { manager, reads } = await makeTwoBridges();
+  manager.startPolling();
+  manager.stop();
+  t.mock.timers.tick(DEFAULT_CONFIG.poll_frequency * 2);
+  await settle();
+  assert.equal(reads.count, 0);
+  assert.equal(manager.pollTimer, undefined);
 });
 
 test('a command the bridge refuses does not mark the bridge unreachable', async () => {

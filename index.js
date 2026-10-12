@@ -6,7 +6,8 @@
 //   1. instantiates the SDK (connection, auth, reconnection: handled for us);
 //   2. loads the persisted bridges;
 //   3. registers the event handlers BEFORE connect();
-//   4. connects and publishes the discovered lights.
+//   4. connects, publishes the discovered lights, then refreshes their states
+//      every `poll_frequency` while connected.
 //
 // Environment variables provided by the Gladys supervisor:
 //   - GLADYS_HOST_API_URL         (host API URL)
@@ -44,11 +45,6 @@ gladys.onSetValue(async (device, feature, value) => {
   await manager.setValue(device, feature, value);
 });
 
-// --- Polling: Gladys asks to refresh a light ---------------------------------
-gladys.onPoll(async (device) => {
-  await manager.poll(device);
-});
-
 // --- Manifest actions (Configuration screen buttons) -------------------------
 gladys.onAction('discover_bridges', () => {
   logger.info('Action discover_bridges');
@@ -64,11 +60,10 @@ gladys.onAction('pair_bridge', () => {
 gladys.onSceneAction('activate_scene', (fields) => manager.activateScene(fields));
 
 // --- Configuration updated by the user ---------------------------------------
-gladys.onConfigUpdated(async (newConfig) => {
+gladys.onConfigUpdated((newConfig) => {
   logger.info('onConfigUpdated -> new configuration received');
+  // Re-arms the light refresh when its interval changed.
   manager.setConfig(normalizeConfig(newConfig));
-  // Re-publish: the poll frequency (per-device property) may have changed.
-  await manager.syncDevices();
 });
 
 // --- Connection lifecycle ----------------------------------------------------
@@ -85,7 +80,13 @@ gladys.on('connected', async () => {
       })
       .catch(() => {});
   }
+  // Even after a failed sync: the refresh only reads the lights registered so
+  // far, it costs nothing when there are none.
+  manager.startPolling();
 });
+
+// Nothing to publish to while disconnected: the next 'connected' restarts it.
+gladys.on('disconnected', () => manager.stopPolling());
 
 // --- Graceful shutdown -------------------------------------------------------
 gladys.handleShutdown((signal) => {

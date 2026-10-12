@@ -16,8 +16,9 @@ locally via its HTTP API — no Hue cloud account required.
 - Press-the-link-button pairing, from a button in the Configuration screen.
 - Exposes each light with the features it supports: **on/off**, **brightness**,
   **color** (RGB ⇄ Hue xy), **white temperature** (mireds).
-- Refreshes light states by polling at a configurable interval, publishing only
-  the values that actually changed.
+- Refreshes light states on its own timer at a configurable interval (one
+  request per bridge, so changes made in the Hue app or by a wall switch show
+  up in Gladys), publishing only the values that actually changed.
 - Recalls the scenes of the Hue app from Gladys scenes (`activate_scene` scene
   action, Gladys 5.1+), found by name and optional room.
 

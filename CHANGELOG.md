@@ -4,6 +4,13 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
 
 ## [Unreleased]
 
+### Fixed
+
+- Changes made outside Gladys (Hue app, wall switch, dimmer, Hue automations)
+  now show up in Gladys within the configured **Refresh interval**, for the
+  lights already created too: until now, light states were only updated after a
+  command or a scene sent from Gladys.
+
 ## [2.0.0] - 2026-09-23
 
 ### Added
