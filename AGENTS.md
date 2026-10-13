@@ -88,9 +88,10 @@ certFingerprint?, platformKey? }] }`. Atomic write via `.tmp` + rename; a failed
 ## Tests
 
 - `node:test`, all in `test/`. No `test/manifest.test.js`. Extra script: `npm run test:coverage`.
-- `test/manager.test.js`: hand-written fake Gladys (`makeGladys()`: `externalIds` returning
-  `ext:test:<type>:<platformId>`, records states/devices/status) and fake client injected via
-  `manager.clientFor = () => client`; stores in `fs.mkdtemp` dirs. Refresh loop tests use
+- Gladys is the SDK's `createFakeGladys()` (`@gladysassistant/integration-sdk/testing`): assert on
+  `gladys.fake.states` / `discoveredDevices` / `connectionStatus`, feed scans with `scanResults`, make a
+  call fail with `t.mock.method(gladys, ...)`. `test/manager.test.js` uses selector `test`
+  (`ext:test:<type>:<platformId>`) and a fake client injected via `manager.clientFor = () => client`; stores in `fs.mkdtemp` dirs. Refresh loop tests use
   `t.mock.timers.enable({ apis: ['setTimeout'] })` then `settle()` (one `setImmediate`).
 - HTTP is mocked with `mock.method(global, 'fetch', ...)`; `https.test.js` uses a real local
   `http.createServer`; `index.test.js` spawns `index.js` against a `ws` WebSocketServer closing with 4000.

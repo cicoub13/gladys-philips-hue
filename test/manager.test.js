@@ -10,38 +10,9 @@ import { FEATURE } from '../src/hue/mapping.js';
 import { resetDiscoveryCache } from '../src/hue/discovery.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 
-// Fake GladysIntegration recording everything published.
-function makeGladys() {
-  const recorded = { states: [], discovered: null, connectionStatus: [] };
-  return {
-    recorded,
-    // The devices the user created (the SDK keeps this list up to date).
-    devices: [],
-    externalIds(type, platformId) {
-      const base = `ext:test:${type}:${platformId}`;
-      return { device: base, feature: (key) => `${base}:${key}` };
-    },
-    async publishStates(states) {
-      recorded.states.push(...states);
-    },
-    // The SDK's dedup, reduced to what these tests need.
-    published: new Map(),
-    async publishChangedStates(states) {
-      const changed = states.filter((s) => this.published.get(s.device_feature_external_id) !== s.state);
-      if (changed.length > 0) {
-        await this.publishStates(changed);
-      }
-      changed.forEach((s) => this.published.set(s.device_feature_external_id, s.state));
-      return { success: true, count: changed.length };
-    },
-    async publishDiscoveredDevices(devices) {
-      recorded.discovered = devices;
-    },
-    async setConnectionStatus(connected, message) {
-      recorded.connectionStatus.push({ connected, message });
-    },
-  };
-}
+// The SDK's fake Gladys, recording everything published. The `test` selector
+// gives the `ext:test:…` external ids the tests below expect.
+const makeGladys = () => createFakeGladys({ selector: 'test' });
 
 // Fake bridge client with an in-memory light.
 function makeFakeClient() {
@@ -70,12 +41,13 @@ function makeFakeClient() {
   };
 }
 
-async function makeManager(gladys = makeGladys()) {
+async function makeManager() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hue-mgr-'));
   const store = new BridgeStore(path.join(dir, 'bridges.json'));
   await store.load();
   await store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-1' });
 
+  const gladys = makeGladys();
   const manager = new HueManager(gladys, { ...DEFAULT_CONFIG }, store);
   const client = makeFakeClient();
   manager.clientFor = () => client;
@@ -157,9 +129,7 @@ test('setValue sends the right Hue state and echoes it', async () => {
 
   await manager.setValue({ external_id: deviceId }, { external_id: ids.feature(FEATURE.BRIGHTNESS) }, 100);
   assert.deepEqual(client.lastSetState, { id: '3', state: { on: true, bri: 254 } });
-  const brightness = gladys.recorded.states.find(
-    (s) => s.device_feature_external_id === ids.feature(FEATURE.BRIGHTNESS),
-  );
+  const brightness = gladys.fake.states.find((s) => s.device_feature_external_id === ids.feature(FEATURE.BRIGHTNESS));
   assert.equal(brightness.state, 100);
 });
 
@@ -170,7 +140,7 @@ test('setValue also publishes the on/off state a command implies', async () => {
 
   // The light starts off; setting a colour turns it on.
   await manager.setValue({ external_id: deviceId }, { external_id: ids.feature(FEATURE.COLOR) }, 0xff0000);
-  const onOff = gladys.recorded.states.find((s) => s.device_feature_external_id === ids.feature(FEATURE.ON_OFF));
+  const onOff = gladys.fake.states.find((s) => s.device_feature_external_id === ids.feature(FEATURE.ON_OFF));
   assert.ok(onOff, 'the on/off state is published alongside the colour');
   assert.equal(onOff.state, 1);
 });
@@ -190,7 +160,7 @@ test('a refresh publishes the current state of the created lights', async () => 
 
   await manager.pollLights();
   const ids = gladys.externalIds('light', manager.registry.get(deviceId).platformId);
-  const onOff = gladys.recorded.states.find((s) => s.device_feature_external_id === ids.feature(FEATURE.ON_OFF));
+  const onOff = gladys.fake.states.find((s) => s.device_feature_external_id === ids.feature(FEATURE.ON_OFF));
   assert.ok(onOff, 'on/off state published');
   assert.equal(onOff.state, 0);
 });
@@ -200,13 +170,13 @@ test('a refresh does not republish states that did not change', async () => {
   await createAll(manager, gladys);
 
   await manager.pollLights();
-  const afterFirstRefresh = gladys.recorded.states.length;
+  const afterFirstRefresh = gladys.fake.states.length;
   assert.ok(afterFirstRefresh > 0);
 
   // Gladys caps an integration at 300 states per minute: an unchanged light
   // must cost nothing.
   await manager.pollLights();
-  assert.equal(gladys.recorded.states.length, afterFirstRefresh);
+  assert.equal(gladys.fake.states.length, afterFirstRefresh);
 });
 
 test('a refresh publishes again once a value really changed (Hue app, wall switch...)', async () => {
@@ -214,11 +184,11 @@ test('a refresh publishes again once a value really changed (Hue app, wall switc
   await createAll(manager, gladys);
 
   await manager.pollLights();
-  const afterFirstRefresh = gladys.recorded.states.length;
+  const afterFirstRefresh = gladys.fake.states.length;
 
   client.light.state.on = true;
   await manager.pollLights();
-  assert.deepEqual(gladys.recorded.states.slice(afterFirstRefresh), [
+  assert.deepEqual(gladys.fake.states.slice(afterFirstRefresh), [
     { device_feature_external_id: `${SALON_ID}:on-off`, state: 1 },
   ]);
 });
@@ -226,7 +196,7 @@ test('a refresh publishes again once a value really changed (Hue app, wall switc
 test('a light deleted then created again in Gladys gets its states again', async () => {
   // The dedup used to survive the deletion: the new device stayed without states
   // until a value changed on the bridge.
-  const { manager, gladys } = await makeManager(createFakeGladys({ selector: 'test' }));
+  const { manager, gladys } = await makeManager();
   await manager.syncDevices();
   const [device] = gladys.fake.discoveredDevices;
   await gladys.fake.deviceCreated(device);
@@ -250,7 +220,7 @@ test('a refresh neither reads nor publishes the lights not created in Gladys', a
   const reads = countReads(client);
   await manager.pollLights();
   assert.equal(reads.count, 0);
-  assert.equal(gladys.recorded.states.length, 0);
+  assert.equal(gladys.fake.states.length, 0);
 });
 
 test('a refresh that read a light before a command does not flip it back', async () => {
@@ -270,7 +240,7 @@ test('a refresh that read a light before a command does not flip it back', async
   answer({ 3: stale });
   await refresh;
 
-  const onOff = gladys.recorded.states.filter((s) => s.device_feature_external_id === `${SALON_ID}:on-off`);
+  const onOff = gladys.fake.states.filter((s) => s.device_feature_external_id === `${SALON_ID}:on-off`);
   assert.equal(onOff.at(-1).state, 1, 'the command echo stays the last word');
 });
 
@@ -309,14 +279,14 @@ test('an unreachable bridge keeps its lights dispatchable', async () => {
 test('syncDevices does not wipe the published devices when every bridge is down', async () => {
   const { manager, gladys, client } = await makeManager();
   await manager.syncDevices();
-  assert.equal(gladys.recorded.discovered.length, 1);
+  assert.equal(gladys.fake.discoveredDevices.length, 1);
 
   client.down = true;
-  gladys.recorded.discovered = 'untouched';
   await manager.syncDevices();
-  assert.equal(gladys.recorded.discovered, 'untouched', 'no empty list published');
-  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, false);
-  assert.match(gladys.recorded.connectionStatus.at(-1).message.fr, /injoignable/);
+  assert.equal(gladys.fake.bodies('POST', '/discovered_device').length, 1, 'no empty list published');
+  assert.equal(gladys.fake.discoveredDevices.length, 1);
+  assert.equal(gladys.fake.connectionStatus.connected, false);
+  assert.match(gladys.fake.connectionStatus.message.fr, /injoignable/);
 });
 
 test('syncDevices reports the missing pairing when no bridge is stored', async () => {
@@ -324,14 +294,14 @@ test('syncDevices reports the missing pairing when no bridge is stored', async (
   store.bridges.length = 0;
   const devices = await manager.syncDevices();
   assert.deepEqual(devices, []);
-  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, false);
-  assert.match(gladys.recorded.connectionStatus.at(-1).message.en, /No Hue bridge paired/);
+  assert.equal(gladys.fake.connectionStatus.connected, false);
+  assert.match(gladys.fake.connectionStatus.message.en, /No Hue bridge paired/);
 });
 
 test('syncDevices reports a healthy connection once lights are published', async () => {
   const { manager, gladys } = await makeManager();
   await manager.syncDevices();
-  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true);
+  assert.equal(gladys.fake.connectionStatus.connected, true);
 });
 
 test('init loads the bridges persisted by a previous run', async () => {
@@ -409,7 +379,7 @@ const HUE_SSDP_RESPONDER = {
 test('candidateBridges merges the discovered bridges with the manual address', async () => {
   const { manager } = await makeManager();
   manager.config = { ...DEFAULT_CONFIG, bridge_ip: '10.0.0.5' };
-  manager.gladys.scanNetwork = async () => [HUE_SSDP_RESPONDER];
+  manager.gladys.fake.scanResults = { ssdp: [HUE_SSDP_RESPONDER] };
   resetDiscoveryCache();
 
   const candidates = await manager.candidateBridges();
@@ -419,7 +389,7 @@ test('candidateBridges merges the discovered bridges with the manual address', a
 test('candidateBridges does not duplicate a manual address already discovered', async () => {
   const { manager } = await makeManager();
   manager.config = { ...DEFAULT_CONFIG, bridge_ip: '192.168.1.42' };
-  manager.gladys.scanNetwork = async () => [HUE_SSDP_RESPONDER];
+  manager.gladys.fake.scanResults = { ssdp: [HUE_SSDP_RESPONDER] };
   resetDiscoveryCache();
 
   assert.equal((await manager.candidateBridges()).length, 1);
@@ -545,7 +515,7 @@ test('a bridge down at startup: its lights work as soon as it answers, without a
   client.down = false;
   await manager.setValue({ external_id: SALON_ID }, { external_id: `${SALON_ID}:on-off` }, 1);
   assert.ok(client.lastSetState, 'the light was commanded');
-  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true, 'the status recovered');
+  assert.equal(gladys.fake.connectionStatus.connected, true, 'the status recovered');
   manager.stop();
 });
 
@@ -571,8 +541,8 @@ test('an unreachable bridge is resynchronized in the background until it answers
 
   client.down = false;
   await manager.resync();
-  assert.equal(gladys.recorded.discovered.length, 1, 'the lights are published');
-  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true);
+  assert.equal(gladys.fake.discoveredDevices.length, 1, 'the lights are published');
+  assert.equal(gladys.fake.connectionStatus.connected, true);
   assert.equal(manager.resyncTimer, undefined, 'the loop stops once everything answers');
 });
 
@@ -599,17 +569,17 @@ test('the status follows the bridge: false when a refresh cannot reach it, true 
   const { manager, gladys, client } = await makeManager();
   await manager.syncDevices();
   await createAll(manager, gladys);
-  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true);
+  assert.equal(gladys.fake.connectionStatus.connected, true);
 
   client.down = true;
   await manager.pollLights();
-  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, false);
-  assert.match(gladys.recorded.connectionStatus.at(-1).message.en, /unreachable/);
+  assert.equal(gladys.fake.connectionStatus.connected, false);
+  assert.match(gladys.fake.connectionStatus.message.en, /unreachable/);
   assert.ok(manager.resyncTimer, 'a resync is scheduled');
 
   client.down = false;
   await manager.pollLights();
-  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true);
+  assert.equal(gladys.fake.connectionStatus.connected, true);
   assert.equal(manager.resyncTimer, undefined);
 });
 
@@ -617,10 +587,10 @@ test('the status is only sent when it changes', async () => {
   const { manager, gladys } = await makeManager();
   await manager.syncDevices();
   await createAll(manager, gladys);
-  const sent = gladys.recorded.connectionStatus.length;
+  const sent = gladys.fake.connectionStatuses.length;
   await manager.pollLights();
   await manager.pollLights();
-  assert.equal(gladys.recorded.connectionStatus.length, sent);
+  assert.equal(gladys.fake.connectionStatuses.length, sent);
 });
 
 /**
@@ -649,7 +619,7 @@ test('the refresh loop reads each bridge once per interval and publishes its lig
   t.mock.timers.tick(1);
   await settle();
   assert.deepEqual([reads.count, otherReads.count], [1, 1], 'one request per bridge, not one per light');
-  const onOff = gladys.recorded.states.filter((s) => s.device_feature_external_id.endsWith(':on-off'));
+  const onOff = gladys.fake.states.filter((s) => s.device_feature_external_id.endsWith(':on-off'));
   assert.deepEqual(onOff.map((s) => s.device_feature_external_id).sort(), [
     `${SALON_ID}:on-off`,
     'ext:test:light:b2-00:17:88:01:aa:on-off',
@@ -717,10 +687,10 @@ test('an unreachable bridge neither stops the other bridges nor the loop', async
   await settle();
   assert.equal(otherReads.count, 1);
   assert.ok(
-    gladys.recorded.states.some((s) => s.device_feature_external_id.startsWith('ext:test:light:b2-')),
+    gladys.fake.states.some((s) => s.device_feature_external_id.startsWith('ext:test:light:b2-')),
     'the lights of the other bridge are published',
   );
-  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, false);
+  assert.equal(gladys.fake.connectionStatus.connected, false);
 
   // Only the refresh publishes states (the background resync of the bridge,
   // also due by then, reads it but publishes the device list).
@@ -728,7 +698,7 @@ test('an unreachable bridge neither stops the other bridges nor the loop', async
   t.mock.timers.tick(DEFAULT_CONFIG.poll_frequency);
   await settle();
   assert.ok(
-    gladys.recorded.states.some((s) => s.device_feature_external_id === `${SALON_ID}:on-off`),
+    gladys.fake.states.some((s) => s.device_feature_external_id === `${SALON_ID}:on-off`),
     'the loop goes on and picks the bridge up again',
   );
   manager.stop();
@@ -779,7 +749,7 @@ test('a command the bridge refuses does not mark the bridge unreachable', async 
     throw error;
   };
   await assert.rejects(() => manager.setValue({ external_id: SALON_ID }, { external_id: `${SALON_ID}:on-off` }, 1));
-  assert.equal(gladys.recorded.connectionStatus.at(-1).connected, true);
+  assert.equal(gladys.fake.connectionStatus.connected, true);
   assert.equal(manager.resyncTimer, undefined);
 });
 
@@ -822,7 +792,7 @@ test('activateScene refreshes the lights of the scene right away', async () => {
   };
   await manager.activateScene({ scene: 'Détente' });
   await new Promise(setImmediate); // the refresh runs after the ack
-  const onOff = gladys.recorded.states.find((s) => s.device_feature_external_id === `${SALON_ID}:on-off`);
+  const onOff = gladys.fake.states.find((s) => s.device_feature_external_id === `${SALON_ID}:on-off`);
   assert.equal(onOff.state, 1);
   assert.equal(reads, 1, 'one read of the bridge, not one per light');
 });
