@@ -12,7 +12,7 @@ Project-specific notes. Generic rules (SDK contract, commands, kit-owned files, 
   is logged, not fatal (Gladys refuses the token transiently while booting; the SDK retries).
   `unhandledRejection` exits the process on purpose.
 - `src/manager.js` holds the in-memory **registry** `device external_id → { platformId, hueId, bridgeIp,
-light, lastValues, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves through it.
+light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves through it.
 - No `onPoll`: Gladys only polls devices with `should_poll`, never set on the lights and never updated on
   devices already created. The manager refreshes on its own `setTimeout` chain (`startPolling` /
   `armPoll` / `runPoll`, never two runs at once, re-armed by `setConfig` when `poll_frequency` changes):
@@ -60,8 +60,9 @@ light, lastValues, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setVal
 - Capabilities come from the Hue `type` string (`getCapabilities`). Conversions: `bri` 1..254 ↔ 1..100 %
   (never reports 0 %, since 0 % means "off" on commands); color RGB int ↔ `xy` (+`bri`); temperature is
   mireds passthrough clamped to `capabilities.control.ct` (default 153..500).
-- `setValue` echoes the value and the implied `on-off=1`; `publishChangedStates` skips unchanged values
-  (per-device `lastValues`).
+- `setValue` echoes the value and the implied `on-off=1`; the SDK's `gladys.publishChangedStates` skips
+  unchanged values (it remembers what Gladys accepted and forgets a device the user creates, updates or
+  deletes).
 
 ## Config and `/data`
 

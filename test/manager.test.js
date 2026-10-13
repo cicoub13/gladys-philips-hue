@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { createFakeGladys } from '@gladysassistant/integration-sdk/testing';
 import { HueManager, nextResyncDelay } from '../src/manager.js';
 import { BridgeStore } from '../src/hue/store.js';
 import { FEATURE } from '../src/hue/mapping.js';
@@ -22,6 +23,16 @@ function makeGladys() {
     },
     async publishStates(states) {
       recorded.states.push(...states);
+    },
+    // The SDK's dedup, reduced to what these tests need.
+    published: new Map(),
+    async publishChangedStates(states) {
+      const changed = states.filter((s) => this.published.get(s.device_feature_external_id) !== s.state);
+      if (changed.length > 0) {
+        await this.publishStates(changed);
+      }
+      changed.forEach((s) => this.published.set(s.device_feature_external_id, s.state));
+      return { success: true, count: changed.length };
     },
     async publishDiscoveredDevices(devices) {
       recorded.discovered = devices;
@@ -59,13 +70,12 @@ function makeFakeClient() {
   };
 }
 
-async function makeManager() {
+async function makeManager(gladys = makeGladys()) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hue-mgr-'));
   const store = new BridgeStore(path.join(dir, 'bridges.json'));
   await store.load();
   await store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-1' });
 
-  const gladys = makeGladys();
   const manager = new HueManager(gladys, { ...DEFAULT_CONFIG }, store);
   const client = makeFakeClient();
   manager.clientFor = () => client;
@@ -211,6 +221,26 @@ test('a refresh publishes again once a value really changed (Hue app, wall switc
   assert.deepEqual(gladys.recorded.states.slice(afterFirstRefresh), [
     { device_feature_external_id: `${SALON_ID}:on-off`, state: 1 },
   ]);
+});
+
+test('a light deleted then created again in Gladys gets its states again', async () => {
+  // The dedup used to survive the deletion: the new device stayed without states
+  // until a value changed on the bridge.
+  const { manager, gladys } = await makeManager(createFakeGladys({ selector: 'test' }));
+  await manager.syncDevices();
+  const [device] = gladys.fake.discoveredDevices;
+  await gladys.fake.deviceCreated(device);
+  await manager.pollLights();
+  const sent = gladys.fake.states.length;
+  assert.ok(sent > 0);
+
+  await gladys.fake.deviceDeleted(device);
+  await gladys.fake.deviceCreated(device);
+  await manager.pollLights();
+  assert.deepEqual(
+    gladys.fake.states.slice(sent).map((s) => s.device_feature_external_id),
+    ['on-off', 'brightness', 'color', 'temperature'].map((key) => `${SALON_ID}:${key}`),
+  );
 });
 
 test('a refresh neither reads nor publishes the lights not created in Gladys', async () => {

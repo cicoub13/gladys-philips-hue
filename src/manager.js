@@ -85,7 +85,7 @@ export class HueManager {
     /**
      * @type {Map<string, {
      *   platformId: string, hueId: string, bridgeIp: string,
-     *   light: object, lastValues: Map<string, number>
+     *   light: object, commandSeq: number
      * }>}
      */
     this.registry = new Map();
@@ -197,9 +197,6 @@ export class HueManager {
           hueId,
           bridgeIp: bridge.ip,
           light,
-          // Last value published per feature, to avoid re-publishing unchanged
-          // states on every refresh (Gladys caps at 300 states/minute).
-          lastValues: new Map(),
           // commandSeq of the last command the bridge accepted for this light.
           commandSeq: 0,
         });
@@ -502,24 +499,6 @@ export class HueManager {
   }
 
   /**
-   * Publish feature states, skipping the ones that did not change since the
-   * last publication for this device.
-   * @param {object} entry - Registry entry of the device.
-   * @param {Array<{ external_id: string, value: number }>} states - Candidate states.
-   * @returns {Promise<void>} Resolves once published.
-   */
-  async publishChangedStates(entry, states) {
-    const changed = states.filter((state) => entry.lastValues.get(state.external_id) !== state.value);
-    if (changed.length === 0) {
-      return;
-    }
-    await this.gladys.publishStates(
-      changed.map((state) => ({ device_feature_external_id: state.external_id, state: state.value })),
-    );
-    changed.forEach((state) => entry.lastValues.set(state.external_id, state.value));
-  }
-
-  /**
    * Execute a user command on a light feature.
    * @param {object} device - Gladys device.
    * @param {object} feature - Gladys device feature.
@@ -544,12 +523,14 @@ export class HueManager {
 
     // Echo the commanded value back so Gladys reflects it immediately, along
     // with the on/off state it implies: setting a colour, a temperature or a
-    // non-zero brightness also switches the light ON.
-    const echoed = [{ external_id: feature.external_id, value }];
+    // non-zero brightness also switches the light ON. Only what changed is sent
+    // (Gladys caps an integration at 300 states/minute): the SDK remembers what
+    // Gladys accepted, and forgets a light the user creates, updates or deletes.
+    const echoed = [{ device_feature_external_id: feature.external_id, state: value }];
     if (kind !== FEATURE.ON_OFF && typeof hueState.on === 'boolean') {
-      echoed.push({ external_id: ids.feature(FEATURE.ON_OFF), value: hueState.on ? 1 : 0 });
+      echoed.push({ device_feature_external_id: ids.feature(FEATURE.ON_OFF), state: hueState.on ? 1 : 0 });
     }
-    await this.publishChangedStates(entry, echoed);
+    await this.gladys.publishChangedStates(echoed);
   }
 
   /**
@@ -643,7 +624,10 @@ export class HueManager {
         if (light && entry.commandSeq <= readSeq) {
           entry.light = light; // refresh cached capabilities/state
           const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
-          await this.publishChangedStates(entry, hueStateToFeatureStates(ids, light));
+          const states = hueStateToFeatureStates(ids, light);
+          await this.gladys.publishChangedStates(
+            states.map((state) => ({ device_feature_external_id: state.external_id, state: state.value })),
+          );
         }
       }
     } catch (error) {
