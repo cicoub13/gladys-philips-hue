@@ -4,6 +4,8 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-13
+
 ### Fixed
 
 - Changes made outside Gladys (Hue app, wall switch, dimmer, Hue automations)
@@ -99,7 +101,8 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
   - Light state refresh by polling.
   - Docker images for `amd64` and `arm64` (Raspberry Pi and similar).
 
-[Unreleased]: https://github.com/cicoub13/gladys-philips-hue/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/cicoub13/gladys-philips-hue/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/cicoub13/gladys-philips-hue/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/cicoub13/gladys-philips-hue/compare/v1.2.0...v2.0.0
 [1.2.0]: https://github.com/cicoub13/gladys-philips-hue/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/cicoub13/gladys-philips-hue/compare/v1.1.1...v1.1.2
