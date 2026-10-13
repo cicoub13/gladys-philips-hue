@@ -73,6 +73,10 @@ gladys.onConfigUpdated((newConfig) => {
 
 // --- Connection lifecycle ----------------------------------------------------
 gladys.on('connected', async () => {
+  // Gladys may have missed states while we were away (a light deleted and
+  // re-created meanwhile): the next refresh sends every value again. The SDK
+  // only forgets on device events, not on reconnection.
+  gladys.forgetPublishedStates();
   try {
     manager.setConfig(normalizeConfig(await gladys.getConfig()));
     await manager.syncDevices();

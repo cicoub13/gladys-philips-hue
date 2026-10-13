@@ -12,7 +12,7 @@ Project-specific notes. Generic rules (SDK contract, commands, kit-owned files, 
   is logged, not fatal (Gladys refuses the token transiently while booting; the SDK retries).
   `unhandledRejection` exits the process on purpose.
 - `src/manager.js` holds the in-memory **registry** `device external_id → { platformId, hueId, bridgeIp,
-light, lastValues, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves through it.
+light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves through it.
 - No `onPoll`: Gladys only polls devices with `should_poll`, never set on the lights and never updated on
   devices already created. The manager refreshes on its own `setTimeout` chain (`startPolling` /
   `armPoll` / `runPoll`, never two runs at once, re-armed by `setConfig` when `poll_frequency` changes):
@@ -60,8 +60,9 @@ light, lastValues, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setVal
 - Capabilities come from the Hue `type` string (`getCapabilities`). Conversions: `bri` 1..254 ↔ 1..100 %
   (never reports 0 %, since 0 % means "off" on commands); color RGB int ↔ `xy` (+`bri`); temperature is
   mireds passthrough clamped to `capabilities.control.ct` (default 153..500).
-- `setValue` echoes the value and the implied `on-off=1`; `publishChangedStates` skips unchanged values
-  (per-device `lastValues`).
+- `setValue` echoes the value and the implied `on-off=1`; the SDK's `gladys.publishChangedStates` skips
+  unchanged values (it remembers what Gladys accepted and forgets a device the user creates, updates or
+  deletes).
 
 ## Config and `/data`
 
@@ -87,9 +88,10 @@ certFingerprint?, platformKey? }] }`. Atomic write via `.tmp` + rename; a failed
 ## Tests
 
 - `node:test`, all in `test/`. No `test/manifest.test.js`. Extra script: `npm run test:coverage`.
-- `test/manager.test.js`: hand-written fake Gladys (`makeGladys()`: `externalIds` returning
-  `ext:test:<type>:<platformId>`, records states/devices/status) and fake client injected via
-  `manager.clientFor = () => client`; stores in `fs.mkdtemp` dirs. Refresh loop tests use
+- Gladys is the SDK's `createFakeGladys()` (`@gladysassistant/integration-sdk/testing`): assert on
+  `gladys.fake.states` / `discoveredDevices` / `connectionStatus`, feed scans with `scanResults`, make a
+  call fail with `t.mock.method(gladys, ...)`. `test/manager.test.js` uses selector `test`
+  (`ext:test:<type>:<platformId>`) and a fake client injected via `manager.clientFor = () => client`; stores in `fs.mkdtemp` dirs. Refresh loop tests use
   `t.mock.timers.enable({ apis: ['setTimeout'] })` then `settle()` (one `setImmediate`).
 - HTTP is mocked with `mock.method(global, 'fetch', ...)`; `https.test.js` uses a real local
   `http.createServer`; `index.test.js` spawns `index.js` against a `ws` WebSocketServer closing with 4000.
