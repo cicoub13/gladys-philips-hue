@@ -45,9 +45,10 @@ All three must pass before committing: CI runs them, plus a coverage threshold w
   (`publishState(s)` 300/min, ≤100 per batch): `publishChangedStates()` skips unchanged values
   and splits the batches.
 - **Polling**: `poll_frequency` is in milliseconds and must be one of `DEVICE_POLL_FREQUENCIES`
-  (1 s to 1 min, anything else is a 400). Since SDK 0.16, Gladys polls a new device carrying a
-  `poll_frequency` unless it is published with `should_poll: false` (a boolean, else a 400): an
-  integration polling on its own timer either omits `poll_frequency` or sends
+  (1 s to 1 min, anything else is a 400). Since Gladys 5.3, the core polls a new device carrying
+  a `poll_frequency` unless it is published with `should_poll: false` (a boolean, else a 400);
+  older cores poll it only with `should_poll: true`, so keep it while `gladys_version` accepts
+  them. An integration polling on its own timer omits `poll_frequency` or sends
   `should_poll: false`. Neither is updated on a device already created.
 - **Changelog**: when the repo has a `CHANGELOG.md`, a change users can notice (fix, feature,
   behaviour, requirement) adds a line under `## [Unreleased]` in the same PR, written for users.
