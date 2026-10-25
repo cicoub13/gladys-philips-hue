@@ -10,8 +10,10 @@
 #   2. ESLint    -> catch real mistakes (undefined vars, dead code, ...);
 #   3. Tests     -> `node --test`, the built-in runner. When the repo defines a
 #                   `coverage` script, it runs instead, so its thresholds gate;
-#   4. npm audit -> production dependencies only;
-#   5. Image     -> the Dockerfile builds and its image passes a Trivy scan,
+#   4. Store     -> the integration-store validator, the same checks as the
+#                   store indexer (manifest, gladys_version, docs, cover);
+#   5. npm audit -> production dependencies only;
+#   6. Image     -> the Dockerfile builds and its image passes a Trivy scan,
 #                   checked here instead of after the image is published.
 #
 # Runs on Node 24, the version the Docker image ships with (see the Dockerfile),
@@ -66,6 +68,13 @@ jobs:
           else
             npm test
           fi
+
+      # Exit 1 when the store would reject the integration (warnings, such as
+      # a cover it would replace, do not fail). Not pinned on purpose: it must
+      # apply the rules the indexer applies today. --skip-image-check: the
+      # image tag of a bumped manifest is only pushed by the release.
+      - name: Validate for the integration store
+        run: npx --yes github:GladysAssistant/integration-store --skip-image-check
 
       - name: Audit the production dependencies
         run: npm audit --omit=dev --audit-level=high
