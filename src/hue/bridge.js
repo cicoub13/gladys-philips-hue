@@ -75,15 +75,19 @@ export function isHttpBlocked(error) {
 /**
  * The error to raise when HTTP is blocked and HTTPS failed too. A transient
  * HTTPS failure (no answer, 429/5xx) is raised as such, so the request is
- * retried and the bridge counted unreachable; anything else (refused
- * certificate, other status) keeps the classification of the HTTP error.
+ * retried, and the bridge counted unreachable when nothing answered at all;
+ * anything else (not the expected bridge, other status) keeps the
+ * classification of the HTTP error.
  * @param {Error & { httpStatus?: number }} httpError - Why HTTP failed.
- * @param {Error & { httpStatus?: number, tlsRefused?: boolean }} httpsError - Why HTTPS failed.
+ * @param {Error & { httpStatus?: number, tlsRefused?: boolean, wrongBridge?: boolean }} httpsError - Why
+ * HTTPS failed.
  * @returns {Error & { httpStatus?: number }} Error carrying both reasons.
  */
 function upgradeFailure(httpError, httpsError) {
   const transient =
-    !httpsError.tlsRefused && (httpsError.httpStatus === undefined || RETRYABLE_STATUS.has(httpsError.httpStatus));
+    !httpsError.tlsRefused &&
+    !httpsError.wrongBridge &&
+    (httpsError.httpStatus === undefined || RETRYABLE_STATUS.has(httpsError.httpStatus));
   const error = new Error(`${httpError.message}; HTTPS failed too: ${httpsError.message}`);
   const status = transient ? httpsError.httpStatus : httpError.httpStatus;
   if (status !== undefined) {
@@ -184,6 +188,14 @@ export class HueBridgeClient {
    * The proof is the unauthenticated `/api/config`: nothing secret is sent to a
    * peer not proven yet, and its certificate must carry the id the bridge
    * announces there (and the stored id, when the store has one).
+   *
+   * Trust-on-first-use limit: this is not a user-initiated pairing, and a 403 or
+   * a refused port 80 is unauthenticated. A host impersonating the bridge on the
+   * LAN (ARP spoofing) can trigger the switch and get its own certificate pinned,
+   * as long as it names the bridge id, which is public (`/api/config`, mDNS).
+   * The same host already reads the username over plain HTTP; once it is gone,
+   * the real bridge fails the pin until it is paired again. Checking the chain
+   * against Signify's root CA would close this (issue #48, §4.11).
    * @returns {Promise<void>} Resolves once switched.
    */
   async probeHttps() {
@@ -191,9 +203,18 @@ export class HueBridgeClient {
     const body = await probe.fetchWith('/api/config', {});
     const announced = String((body && body.bridgeid) || '').toLowerCase();
     const expected = this.id ? String(this.id).toLowerCase() : announced;
-    if (!announced || announced !== expected || probe.certCommonName !== announced) {
+    if (!announced || announced !== expected) {
+      // With a stored id, the TLS layer already required it as the certificate
+      // CN: what differs here is the bridge answering at this address.
       const error = new Error(
-        `Bridge ${this.ip} answered on HTTPS with a certificate for "${probe.certCommonName}", not for bridge ${expected || 'unknown'}`,
+        `Bridge ${this.ip} announces ${announced ? `bridge ${announced}` : 'no bridge id'} on HTTPS, expected ${expected || 'a bridge id'}`,
+      );
+      error.wrongBridge = true;
+      throw error;
+    }
+    if (probe.certCommonName !== announced) {
+      const error = new Error(
+        `Bridge ${this.ip} answered on HTTPS with a certificate for "${probe.certCommonName}", not for bridge ${announced}`,
       );
       error.tlsRefused = true;
       throw error;

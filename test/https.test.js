@@ -1,6 +1,8 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
+import tls from 'node:tls';
 import { checkCertificate, fingerprintOf, normalizeFingerprint, requestJson } from '../src/hue/https.js';
 
 const BRIDGE_ID = '001788fffe123456';
@@ -108,6 +110,61 @@ test('a bridge trickling its answer is cut at the overall deadline', async () =>
   try {
     await assert.rejects(() => requestJson(server.url, { timeoutMs: 600 }), /did not answer within 600 ms/);
     assert.ok(Date.now() - started < 3000, 'the deadline fired on time');
+  } finally {
+    server.close();
+  }
+});
+
+/**
+ * Route `tls.connect` to a local plain HTTP server, presenting a fake
+ * certificate: the real `https.request` runs on top, and what it writes reaches
+ * the server.
+ * @param {string} url - URL of the local server.
+ * @param {string} commonName - CN of the fake certificate.
+ */
+function tlsTo(url, commonName) {
+  const { port } = new URL(url);
+  mock.method(tls, 'connect', () => {
+    const socket = net.connect(Number(port), '127.0.0.1');
+    socket.getPeerCertificate = () => certificate(commonName);
+    socket.once('connect', () => socket.emit('secureConnect'));
+    return socket;
+  });
+}
+
+test('an HTTPS request names the bridge in its Host header, without the default port', async (t) => {
+  // Without an agent, the request believed the default port was 80.
+  t.after(() => mock.restoreAll());
+  const hosts = [];
+  const server = await serve((request, response) => {
+    hosts.push(request.headers.host);
+    response.end('{}');
+  });
+  tlsTo(server.url, BRIDGE_ID);
+  try {
+    const body = await requestJson('https://127.0.0.1/api/config', { bridgeId: BRIDGE_ID });
+    assert.equal(body.commonName, BRIDGE_ID);
+    assert.deepEqual(hosts, ['127.0.0.1']);
+  } finally {
+    server.close();
+  }
+});
+
+test('nothing is written to a peer whose certificate is refused', async (t) => {
+  // The request path carries the username: an impostor must not even read it.
+  t.after(() => mock.restoreAll());
+  const received = [];
+  const server = await serve((request, response) => {
+    received.push(request.url);
+    response.end('{}');
+  });
+  tlsTo(server.url, 'impostor');
+  try {
+    const error = await requestJson('https://127.0.0.1/api/secret-username/lights', { bridgeId: BRIDGE_ID }).catch(
+      (caught) => caught,
+    );
+    assert.equal(error.tlsRefused, true);
+    assert.deepEqual(received, []);
   } finally {
     server.close();
   }

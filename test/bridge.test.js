@@ -270,11 +270,23 @@ test('the switch never sends the username to a certificate that is not the bridg
 });
 
 test('the switch refuses another bridge answering at the same address', async () => {
+  // Its own certificate is refused by the TLS layer, before anything is sent.
   mockFetch([HTTP_BLOCKED]);
   stubHttps(bridgeOverHttps({}, { cn: 'ecb5fafffe000000', bridgeid: 'ECB5FAFFFE000000' }));
   const { client, upgrades } = pairedOverHttp();
 
-  await assert.rejects(() => client.getLights(), /HTTPS failed too/);
+  await assert.rejects(() => client.getLights(), /HTTPS failed too: Refused the TLS certificate/);
+  assert.deepEqual(upgrades, []);
+});
+
+test('the switch says so when the bridge announces another id than its certificate', async () => {
+  mockFetch([HTTP_BLOCKED]);
+  stubHttps(bridgeOverHttps({}, { bridgeid: 'ECB5FAFFFE000000' }));
+  const { client, upgrades } = pairedOverHttp();
+
+  const error = await client.getLights().catch((caught) => caught);
+  assert.match(error.message, /announces bridge ecb5fafffe000000 on HTTPS, expected 001788fffe123456/);
+  assert.equal(error.httpStatus, 403, 'not a transient failure');
   assert.deepEqual(upgrades, []);
 });
 

@@ -171,6 +171,9 @@ export function requestJson(url, options = {}) {
         // See the trust model above: we verify the certificate ourselves.
         ...(secure
           ? {
+              // Without an agent nothing tells the request that HTTPS defaults to
+              // 443: the Host header would read `<ip>:80`.
+              defaultPort: 443,
               createConnection: verifiedConnection(
                 target,
                 { pinnedFingerprint, bridgeId },
