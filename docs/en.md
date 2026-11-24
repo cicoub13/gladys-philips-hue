@@ -22,6 +22,9 @@ interval** (default: every minute): changes made outside Gladys — Hue app, wal
 switch, dimmer, Hue automations — show up in Gladys within that interval.
 Changes made from Gladys show up right away.
 
+A light powered off at the wall (its switch cut) shows as off in Gladys, with an
+**unreachable** badge on the Devices page, until it has power again.
+
 ### Hue scenes in Gladys scenes
 
 > **Requires Gladys 5.1 or later.**
@@ -61,6 +64,17 @@ running.
 3. **Press the round link button** on top of the Hue bridge.
 4. Within 30 seconds, click **Pair bridge**. On success, your lights appear in
    the **Discovery** tab, ready to be created as devices.
+
+### Replacing a bridge
+
+After replacing your bridge or migrating to a Hue Bridge Pro, pair the new one
+(steps above), then click **Forget unreachable bridges**: the integration
+forgets every paired bridge that no longer answers, or no longer accepts the
+integration, so it stops reporting it unreachable. A bridge that still works is
+never forgotten, even a busy one, and neither is one that has only just stopped
+answering (it may be restarting): click again once it has been silent for 5 minutes. The lights of the new
+bridge appear as new devices in the **Discovery** tab; delete the old ones from
+the Devices page.
 
 ## How the bridge is found
 
@@ -108,8 +122,13 @@ Bridge**.
 missing. Press the round button on top of the bridge, then click **Pair bridge**
 again within the next 30 seconds.
 
-**Lights stopped responding**: check that the bridge did not change IP address
-(reserve it in your router), then run a discovery again.
+**Lights stopped responding**: the bridge may have changed IP address.
+**Discover bridges** does not update the address of a paired bridge: press the
+link button on the bridge, then click **Pair bridge** again. Your lights keep
+their devices in Gladys. Then reserve the bridge address in your router so it
+does not change again. One exception: a bridge paired with version 1.1.0 or
+earlier through **Bridge IP address**, that the integration has not reached
+since you updated it, comes back with new devices.
 
 **Lights stopped responding after a bridge firmware update**: since firmware
 1.78, the bridge refuses plain HTTP. A bridge paired over HTTP is switched to
@@ -123,6 +142,9 @@ as Gladys."** in the connection status: the paired bridge no longer answers.
 While it is away, a command may fail with `Hue bridge unreachable: light … will be
 available again as soon as the bridge answers`. The integration keeps trying in
 the background, and the lights come back on their own once the bridge answers.
+If that bridge is gone for good (replaced, migrated to a Hue Bridge Pro), click
+**Forget unreachable bridges** (see "Replacing a bridge"). A bridge that was
+reset only needs to be paired again.
 
 **"A Hue bridge was found but could not be paired"**: the bridge answered
 discovery, then failed during pairing. Check that it stays reachable from

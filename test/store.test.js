@@ -134,3 +134,68 @@ test('BridgeStore survives concurrent writes', async () => {
   await reopened.load();
   assert.equal(reopened.list().length, 2);
 });
+
+test('BridgeStore removes bridges and persists the removal', async () => {
+  const file = await tempFile();
+  const store = new BridgeStore(file);
+  await store.load();
+  await store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-1' });
+  await store.upsert({ id: 'b2', ip: '192.168.1.20', username: 'user-2' });
+
+  await store.remove([store.list()[1]]);
+  const reopened = new BridgeStore(file);
+  await reopened.load();
+  assert.deepEqual(
+    reopened.list().map((bridge) => bridge.id),
+    ['b1'],
+  );
+});
+
+test('a bridge paired by 1.0.x/1.1.0, forgotten then paired again, keeps its external_ids', async () => {
+  // Its lights' ids are built from its old IP (`platformKey`): a fresh entry
+  // without it would turn every light into a new device.
+  const file = await tempFile();
+  const store = new BridgeStore(file);
+  await store.load();
+  store.bridges.push({ id: 'abc', ip: '192.168.1.20', username: 'old', platformKey: '192.168.1.10' });
+  store.bridges.push({ ip: '192.168.1.30', username: 'older' }); // id never learned
+  await store.remove([...store.list()]);
+
+  const reopened = new BridgeStore(file);
+  await reopened.load();
+  await reopened.upsert({ id: 'abc', ip: '192.168.1.50', username: 'new' });
+  await reopened.upsert({ id: 'def', ip: '192.168.1.30', username: 'new-2' });
+  assert.deepEqual(
+    reopened.list().map((bridge) => bridge.platformKey),
+    ['192.168.1.10', '192.168.1.30'],
+  );
+  assert.deepEqual(reopened.forgotten, [], 'each key is given back once');
+});
+
+test('forgetting a bridge with an id-based key keeps no key, only its id', async () => {
+  const file = await tempFile();
+  const store = new BridgeStore(file);
+  await store.load();
+  await store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-1' });
+  await store.remove([...store.list()]);
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), {
+    bridges: [],
+    forgotten: [{ id: 'b1', ip: '192.168.1.10' }],
+  });
+  await store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-2' });
+  assert.deepEqual(store.list(), [{ id: 'b1', ip: '192.168.1.10', username: 'user-2' }]);
+});
+
+test("a bridge with an id paired at a forgotten id-less bridge's address keeps its own key", async () => {
+  // Otherwise its lights would move from `B-…` to `10.0.0.1-…`, orphaning its devices.
+  const store = new BridgeStore(await tempFile());
+  await store.load();
+  store.bridges = [
+    { ip: '10.0.0.1', username: 'user-a' },
+    { id: 'B', ip: '10.0.0.2', username: 'user-b' },
+  ];
+  await store.remove([...store.list()]);
+  await store.upsert({ id: 'B', ip: '10.0.0.1', username: 'user-b2' });
+  assert.deepEqual(store.list(), [{ id: 'B', ip: '10.0.0.1', username: 'user-b2' }]);
+  assert.deepEqual(store.forgotten, [{ ip: '10.0.0.1', platformKey: '10.0.0.1' }]);
+});

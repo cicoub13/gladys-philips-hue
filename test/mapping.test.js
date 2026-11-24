@@ -77,7 +77,7 @@ test('rgb <-> xy keeps the dominant channel', () => {
   const [x, y] = rgbToXy(0xff0000); // pure red
   assert.ok(x > 0.6 && x < 0.75, `red x in gamut: ${x}`);
   assert.ok(y > 0.25 && y < 0.35, `red y in gamut: ${y}`);
-  const rgb = intToRgb(xyToRgb([x, y], 254));
+  const rgb = intToRgb(xyToRgb([x, y]));
   assert.ok(rgb.r >= rgb.g && rgb.r >= rgb.b, 'red stays dominant after round-trip');
 });
 
@@ -110,6 +110,27 @@ test('hueStateToFeatureStates reports every supported feature', () => {
   assert.equal(byId[ids.feature(FEATURE.BRIGHTNESS)], 100);
   assert.equal(byId[ids.feature(FEATURE.TEMPERATURE)], 300);
   assert.equal(typeof byId[ids.feature(FEATURE.COLOR)], 'number');
+});
+
+test('the reported color does not darken as the light dims', () => {
+  // Brightness is its own feature: a warm white at 10 % used to read as brown.
+  const ids = makeIds();
+  const color = (bri) =>
+    hueStateToFeatureStates(ids, { ...extendedColorLight, state: { on: true, bri, xy: [0.4573, 0.41] } }).find(
+      (state) => state.external_id === ids.feature(FEATURE.COLOR),
+    ).value;
+  assert.equal(color(25), color(254));
+  assert.equal(color(254), 0xffaf5d);
+});
+
+test('a light cut at the wall is reported off', () => {
+  // The bridge keeps its last `on: true`, with `reachable: false`.
+  const ids = makeIds();
+  const states = hueStateToFeatureStates(ids, {
+    ...extendedColorLight,
+    state: { ...extendedColorLight.state, on: true, reachable: false },
+  });
+  assert.equal(states.find((state) => state.external_id === ids.feature(FEATURE.ON_OFF)).value, 0);
 });
 
 test('featureValueToHueState builds correct Hue payloads', () => {

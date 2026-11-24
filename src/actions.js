@@ -140,3 +140,48 @@ export async function pairBridgeAction(manager) {
     }
   );
 }
+
+/**
+ * "Forget unreachable bridges" button: drop the paired bridges that do not
+ * answer any more (replaced, migrated to a Bridge Pro, reset), so they stop
+ * being reported unreachable and retried forever.
+ * @param {import('./manager.js').HueManager} manager - The Hue manager.
+ * @returns {Promise<{ en: string, fr: string }>} Message shown under the button.
+ */
+export async function forgetBridgesAction(manager) {
+  if (manager.store.list().length === 0) {
+    return {
+      en: 'No Hue bridge paired, nothing to forget.',
+      fr: 'Aucun bridge Hue appairé, rien à oublier.',
+    };
+  }
+
+  const { forgotten, busy, saveError } = await manager.forgetUnreachableBridges();
+  const busyNote =
+    busy.length > 0
+      ? {
+          en: ` Kept ${busy.map((bridge) => bridge.ip).join(', ')}: busy, restarting or only just stopped answering. If it is really gone, try again in a few minutes.`,
+          fr: ` ${busy.map((bridge) => bridge.ip).join(', ')} conservé(s) : occupé, en redémarrage ou injoignable depuis peu. S'il a vraiment disparu, réessayez dans quelques minutes.`,
+        }
+      : { en: '', fr: '' };
+  if (forgotten.length === 0 && busy.length > 0) {
+    return { en: `No bridge forgotten.${busyNote.en}`, fr: `Aucun bridge oublié.${busyNote.fr}` };
+  }
+  if (forgotten.length === 0) {
+    return {
+      en: 'No bridge to forget: every paired bridge answers.',
+      fr: 'Aucun bridge à oublier : tous les bridges appairés répondent.',
+    };
+  }
+
+  const ips = forgotten.map((bridge) => bridge.ip).join(', ');
+  const message = {
+    en: `Forgot ${forgotten.length} bridge(s) that no longer answer, or no longer accept the integration: ${ips}. Their lights stay in Gladys: delete them from the Devices page if you no longer use them.${busyNote.en}`,
+    fr: `${forgotten.length} bridge(s) qui ne répond(ent) plus, ou n'accepte(nt) plus l'intégration, oublié(s) : ${ips}. Leurs lampes restent dans Gladys : supprimez-les depuis la page Appareils si vous ne les utilisez plus.${busyNote.fr}`,
+  };
+  if (saveError) {
+    message.en += ` The change could NOT be saved (${saveError.message}): the bridge(s) will come back after a restart.`;
+    message.fr += ` La modification n'a PAS pu être enregistrée (${saveError.message}) : le(s) bridge(s) reviendra(ont) au redémarrage.`;
+  }
+  return message;
+}

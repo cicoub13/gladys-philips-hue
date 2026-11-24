@@ -24,6 +24,10 @@ de Gladys — application Hue, interrupteur mural, variateur, automatisations Hu
 — apparaissent dans Gladys dans cet intervalle. Ceux faits depuis Gladys
 apparaissent immédiatement.
 
+Une lampe coupée à l'interrupteur mural apparaît éteinte dans Gladys, avec un
+badge **injoignable** sur la page Appareils, jusqu'à ce qu'elle soit de nouveau
+alimentée.
+
 ### Scènes Hue dans les scènes Gladys
 
 > **Nécessite Gladys 5.1 ou supérieur.**
@@ -63,6 +67,17 @@ la scène Gladys continue de s'exécuter.
 3. **Appuyez sur le bouton rond** situé sur le dessus du bridge Hue.
 4. Dans les 30 secondes, cliquez sur **Appairer le bridge**. En cas de succès,
    vos lampes apparaissent dans l'onglet **Découverte**, prêtes à être créées.
+
+### Remplacer un bridge
+
+Après avoir remplacé votre bridge ou migré vers un Hue Bridge Pro, appairez le
+nouveau (étapes ci-dessus), puis cliquez sur **Oublier les bridges
+injoignables** : l'intégration oublie tous les bridges appairés qui ne répondent
+plus, ou n'acceptent plus l'intégration, et cesse de les signaler injoignables.
+Un bridge qui fonctionne n'est jamais oublié, même s'il est occupé, pas plus
+qu'un bridge qui vient tout juste de cesser de répondre (il redémarre
+peut-être) : recliquez quand il ne répond plus depuis 5 minutes. Les lampes du nouveau bridge apparaissent comme de nouveaux appareils
+dans l'onglet **Découverte** ; supprimez les anciens depuis la page Appareils.
 
 ## Comment le bridge est trouvé
 
@@ -114,8 +129,14 @@ trouverez dans l'application Hue, dans **Paramètres → Mes appareils → Bridg
 l'appairage manque. Appuyez sur le bouton rond du bridge, puis recliquez sur
 **Appairer le bridge** dans les 30 secondes qui suivent.
 
-**Les lampes ne répondent plus** : vérifiez que le bridge n'a pas changé
-d'adresse IP (fixez-la dans votre box), puis relancez une découverte.
+**Les lampes ne répondent plus** : le bridge a peut-être changé d'adresse IP.
+**Découvrir les bridges** ne met pas à jour l'adresse d'un bridge déjà appairé :
+appuyez sur le bouton du bridge, puis recliquez sur **Appairer le bridge**. Vos
+lampes gardent leurs appareils dans Gladys. Fixez ensuite l'adresse du bridge
+dans votre box pour qu'elle ne change plus. Une exception : un bridge appairé
+avec la version 1.1.0 ou antérieure via **Adresse IP du bridge**, que
+l'intégration n'a pas joint depuis sa mise à jour, revient avec de nouveaux
+appareils.
 
 **Les lampes ne répondent plus après une mise à jour du bridge** : depuis le
 firmware 1.78, le bridge refuse le HTTP simple. Un bridge appairé en HTTP passe
@@ -129,7 +150,10 @@ Gladys. »** dans l'état de connexion : le bridge appairé ne répond plus. Tan
 qu'il est absent, une commande peut échouer avec
 `Hue bridge unreachable: light … will be available again as soon as the bridge answers`.
 L'intégration continue d'essayer en arrière-plan, et les lampes reviennent
-d'elles-mêmes dès que le bridge répond.
+d'elles-mêmes dès que le bridge répond. Si ce bridge a disparu pour de bon
+(remplacé, migré vers un Hue Bridge Pro), cliquez sur **Oublier les bridges
+injoignables** (voir « Remplacer un bridge »). Un bridge réinitialisé n'a besoin
+que d'être appairé à nouveau.
 
 **« Un bridge Hue a été trouvé mais n'a pas pu être appairé »** : le bridge a
 répondu à la découverte, puis a échoué pendant l'appairage. Vérifiez qu'il reste
