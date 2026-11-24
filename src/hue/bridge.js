@@ -5,10 +5,12 @@
 //   - it is available on every Hue bridge generation (v1 round, v2 square), and
 //   - it is more than enough to control lights.
 //
-// It is reached over plain HTTP by default, and over HTTPS when the bridge
-// refuses HTTP — Signify is progressively blocking it. The TLS side (private-CA
-// certificate, trust-on-first-use pinning) lives in `./https.js`; this client
-// only carries the `scheme` and the pinned fingerprint around.
+// New pairings use HTTPS whenever the bridge serves it, and plain HTTP otherwise
+// (BSB001). A bridge paired over HTTP keeps using it until its firmware blocks
+// it (1.78+): it is then switched to HTTPS on the fly, with the same username
+// (see `upgradeToHttps`). The TLS side (private-CA certificate, trust-on-first-use
+// pinning) lives in `./https.js`; this client only carries the `scheme` and the
+// pinned fingerprint around.
 //
 // Two traps this client handles for its callers:
 //   1. the v1 API answers HTTP 200 with a body `[{"error": {...}}]` for MOST
@@ -60,19 +62,57 @@ export function findHueError(body) {
 }
 
 /**
+ * Whether a plain HTTP failure means the bridge refuses HTTP and must be reached
+ * over HTTPS: firmware 1.78+ answers `403 unauthorized user - HTTP access is
+ * blocked`, and a bridge may also close port 80 altogether.
+ * @param {Error & { httpStatus?: number, cause?: { code?: string } }} error - HTTP failure.
+ * @returns {boolean} True when HTTPS is worth a try.
+ */
+export function isHttpBlocked(error) {
+  return error.httpStatus === 403 || (error.cause && error.cause.code) === 'ECONNREFUSED';
+}
+
+/**
+ * The error to raise when HTTP is blocked and HTTPS failed too. A transient
+ * HTTPS failure (no answer, 429/5xx) is raised as such, so the request is
+ * retried, and the bridge counted unreachable when nothing answered at all;
+ * anything else (not the expected bridge, other status) keeps the
+ * classification of the HTTP error.
+ * @param {Error & { httpStatus?: number }} httpError - Why HTTP failed.
+ * @param {Error & { httpStatus?: number, tlsRefused?: boolean, wrongBridge?: boolean }} httpsError - Why
+ * HTTPS failed.
+ * @returns {Error & { httpStatus?: number }} Error carrying both reasons.
+ */
+function upgradeFailure(httpError, httpsError) {
+  const transient =
+    !httpsError.tlsRefused &&
+    !httpsError.wrongBridge &&
+    (httpsError.httpStatus === undefined || RETRYABLE_STATUS.has(httpsError.httpStatus));
+  const error = new Error(`${httpError.message}; HTTPS failed too: ${httpsError.message}`);
+  const status = transient ? httpsError.httpStatus : httpError.httpStatus;
+  if (status !== undefined) {
+    error.httpStatus = status;
+  }
+  return error;
+}
+
+/**
  * Thin client around one Philips Hue bridge.
  */
 export class HueBridgeClient {
   /**
    * @param {string} ip - Bridge IP address on the local network.
    * @param {string} [username] - Bridge API username (a.k.a. application key).
-   * @param {{ scheme?: string, id?: string, certFingerprint?: string }} [options] - Transport details
-   * resolved at identification time (see `./identify.js`) and persisted by the store.
+   * @param {{ scheme?: string, id?: string, certFingerprint?: string, timeoutMs?: number,
+   *   onHttpsUpgrade?: (transport: { scheme: string, certFingerprint?: string }) => Promise<void> }} [options] -
+   * Transport details resolved at identification time (see `./identify.js`) and persisted by the store.
+   * `onHttpsUpgrade` enables the switch to HTTPS of a bridge that blocks HTTP, and persists it.
    */
   constructor(ip, username, options = {}) {
     this.ip = ip;
     this.username = username;
-    // Plain HTTP unless identification proved the bridge only answers on TLS.
+    // The scheme the bridge was paired on; plain HTTP for entries saved before
+    // the scheme was stored.
     this.scheme = options.scheme === 'https' ? 'https' : 'http';
     this.id = options.id;
     // Pinned on the first HTTPS contact, then enforced (see `./https.js`).
@@ -80,6 +120,7 @@ export class HueBridgeClient {
     // Identification probes every discovery candidate and must stay snappy, so
     // it shortens this; normal traffic keeps the generous default.
     this.timeoutMs = options.timeoutMs || REQUEST_TIMEOUT_MS;
+    this.onHttpsUpgrade = options.onHttpsUpgrade;
   }
 
   /**
@@ -93,7 +134,8 @@ export class HueBridgeClient {
   }
 
   /**
-   * Perform one request to the bridge, with a timeout.
+   * Perform one request to the bridge, with a timeout, switching a paired
+   * bridge that blocks HTTP to HTTPS (see `upgradeToHttps`).
    *
    * Errors are re-thrown with the username stripped out of the path: they end up
    * in the Gladys logs and UI, and the username is the key to the whole bridge.
@@ -102,6 +144,94 @@ export class HueBridgeClient {
    * @returns {Promise<any>} Parsed JSON response.
    */
   async fetchOnce(path, options) {
+    if (this.scheme === 'http' && this.onHttpsUpgrade) {
+      try {
+        return await this.fetchWith(path, options);
+      } catch (error) {
+        if (!isHttpBlocked(error)) {
+          throw error;
+        }
+        await this.upgradeToHttps(error);
+      }
+    }
+    // Replayed over HTTPS after a switch, with the same username: the
+    // application key is not tied to the transport, so no link-button press.
+    return this.fetchWith(path, options);
+  }
+
+  /**
+   * Switch this client to HTTPS, once: concurrent requests refused over HTTP
+   * share the same switch. When it fails, the client stays on HTTP and the next
+   * refused request tries again.
+   * @param {Error} httpError - Why HTTP failed.
+   * @returns {Promise<void>} Resolves once the client talks HTTPS.
+   * @throws {Error} Both reasons, classified by `upgradeFailure`.
+   */
+  async upgradeToHttps(httpError) {
+    if (!this.httpsUpgrade) {
+      this.httpsUpgrade = this.probeHttps().catch((error) => {
+        this.httpsUpgrade = undefined;
+        throw error;
+      });
+    }
+    try {
+      await this.httpsUpgrade;
+    } catch (error) {
+      throw upgradeFailure(httpError, error);
+    }
+  }
+
+  /**
+   * Prove that the bridge answers on HTTPS, pin its certificate, then hand the
+   * new transport to `onHttpsUpgrade` to be persisted.
+   *
+   * The proof is the unauthenticated `/api/config`: nothing secret is sent to a
+   * peer not proven yet, and its certificate must carry the id the bridge
+   * announces there (and the stored id, when the store has one).
+   *
+   * Trust-on-first-use limit: this is not a user-initiated pairing, and a 403 or
+   * a refused port 80 is unauthenticated. A host impersonating the bridge on the
+   * LAN (ARP spoofing) can trigger the switch and get its own certificate pinned,
+   * as long as it names the bridge id, which is public (`/api/config`, mDNS).
+   * The same host already reads the username over plain HTTP; once it is gone,
+   * the real bridge fails the pin until it is paired again. Checking the chain
+   * against Signify's root CA would close this (issue #48, §4.11).
+   * @returns {Promise<void>} Resolves once switched.
+   */
+  async probeHttps() {
+    const probe = new HueBridgeClient(this.ip, undefined, { scheme: 'https', id: this.id, timeoutMs: this.timeoutMs });
+    const body = await probe.fetchWith('/api/config', {});
+    const announced = String((body && body.bridgeid) || '').toLowerCase();
+    const expected = this.id ? String(this.id).toLowerCase() : announced;
+    if (!announced || announced !== expected) {
+      // With a stored id, the TLS layer already required it as the certificate
+      // CN: what differs here is the bridge answering at this address.
+      const error = new Error(
+        `Bridge ${this.ip} announces ${announced ? `bridge ${announced}` : 'no bridge id'} on HTTPS, expected ${expected || 'a bridge id'}`,
+      );
+      error.wrongBridge = true;
+      throw error;
+    }
+    if (probe.certCommonName !== announced) {
+      const error = new Error(
+        `Bridge ${this.ip} answered on HTTPS with a certificate for "${probe.certCommonName}", not for bridge ${announced}`,
+      );
+      error.tlsRefused = true;
+      throw error;
+    }
+    this.certFingerprint = probe.certFingerprint;
+    this.scheme = 'https';
+    logger.info(`Bridge ${this.ip} blocks plain HTTP, switched to HTTPS`);
+    await this.onHttpsUpgrade({ scheme: 'https', certFingerprint: this.certFingerprint });
+  }
+
+  /**
+   * One request over the current scheme.
+   * @param {string} path - Request path.
+   * @param {object} options - Request options.
+   * @returns {Promise<any>} Parsed JSON response.
+   */
+  async fetchWith(path, options) {
     // HTTPS needs certificate inspection, which the global `fetch` cannot do:
     // that path goes through `node:https` (see ./https.js). Plain HTTP keeps
     // using `fetch` — no TLS to verify, and nothing to gain from switching.
@@ -113,9 +243,11 @@ export class HueBridgeClient {
           pinnedFingerprint: this.certFingerprint,
           bridgeId: this.id,
         });
-        // First contact: remember what we trusted so the caller can persist it.
+        // First contact: remember what we trusted so the caller can persist it,
+        // and whom the certificate names, for the caller to check.
         if (body && body.fingerprint && !this.certFingerprint) {
           this.certFingerprint = body.fingerprint;
+          this.certCommonName = body.commonName;
         }
         return body;
       } catch (error) {

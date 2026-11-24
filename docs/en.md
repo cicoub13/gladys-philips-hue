@@ -111,6 +111,13 @@ again within the next 30 seconds.
 **Lights stopped responding**: check that the bridge did not change IP address
 (reserve it in your router), then run a discovery again.
 
+**Lights stopped responding after a bridge firmware update**: since firmware
+1.78, the bridge refuses plain HTTP. A bridge paired over HTTP is switched to
+HTTPS automatically, with no new pairing, and the logs say `Bridge … blocks
+plain HTTP, switched to HTTPS`. If the logs show `HTTPS failed too` instead,
+press the link button on the bridge and click **Pair bridge** again: your
+lights keep their devices in Gladys.
+
 **"Hue bridge unreachable. Check that it is powered on and on the same network
 as Gladys."** in the connection status: the paired bridge no longer answers.
 While it is away, a command may fail with `Hue bridge unreachable: light … will be

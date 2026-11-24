@@ -117,6 +117,13 @@ l'appairage manque. Appuyez sur le bouton rond du bridge, puis recliquez sur
 **Les lampes ne répondent plus** : vérifiez que le bridge n'a pas changé
 d'adresse IP (fixez-la dans votre box), puis relancez une découverte.
 
+**Les lampes ne répondent plus après une mise à jour du bridge** : depuis le
+firmware 1.78, le bridge refuse le HTTP simple. Un bridge appairé en HTTP passe
+automatiquement en HTTPS, sans nouvel appairage, et les logs indiquent
+`Bridge … blocks plain HTTP, switched to HTTPS`. Si les logs indiquent plutôt
+`HTTPS failed too`, appuyez sur le bouton du bridge et recliquez sur
+**Appairer le bridge** : vos lampes gardent leurs appareils dans Gladys.
+
 **« Bridge Hue injoignable. Vérifiez qu'il est allumé et sur le même réseau que
 Gladys. »** dans l'état de connexion : le bridge appairé ne répond plus. Tant
 qu'il est absent, une commande peut échouer avec
