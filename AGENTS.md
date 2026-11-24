@@ -7,8 +7,9 @@ Project-specific notes. Generic rules (SDK contract, commands, kit-owned files, 
 
 - `index.js` only wires SDK events to `HueManager`: `onScanRequest`/`connected` → `syncDevices()`,
   `connected` → `startPolling()`, `disconnected` → `stopPolling()`, `onConfigUpdated` → `setConfig()`,
-  `onSetValue` → `setValue()`, `onAction('discover_bridges'|'pair_bridge')`
-  → `src/actions.js`, `onSceneAction('activate_scene')` → `activateScene()`. A failed initial `connect()`
+  `onSetValue` → `setValue()`, `onAction('discover_bridges'|'pair_bridge'|'forget_bridges')`
+  → `src/actions.js`, `onSceneAction('activate_scene')` → `activateScene()`, device
+  created/updated/deleted and `connected` → `forgetTransports()`. A failed initial `connect()`
   is logged, not fatal (Gladys refuses the token transiently while booting; the SDK retries).
   `unhandledRejection` exits the process on purpose.
 - `src/manager.js` holds the in-memory **registry** `device external_id → { platformId, hueId, bridgeIp,
@@ -90,6 +91,10 @@ certFingerprint?, platformKey? }] }`. Atomic write via `.tmp` + rename; a failed
 - Connection status is recomputed from `unreachable` and sent only when it changes.
 - Bridges are addressed by their stored `ip` (registry entries and `unreachable` hold `bridgeIp`);
   nothing re-discovers a moved bridge automatically, re-pairing updates the ip (`upsert` keyed by id).
+- A light with `state.reachable: false` (cut at the wall) is published off, with the `unreachable`
+  transport badge (`publishLightTransports`, created devices only, only on change, cache in
+  `manager.transports`). `forgetUnreachableBridges()` (button `forget_bridges`) drops every stored
+  bridge whose `getLights()` fails, never one that answers.
 
 ## Tests
 

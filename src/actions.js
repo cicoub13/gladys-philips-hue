@@ -140,3 +140,38 @@ export async function pairBridgeAction(manager) {
     }
   );
 }
+
+/**
+ * "Forget unreachable bridges" button: drop the paired bridges that do not
+ * answer any more (replaced, migrated to a Bridge Pro, reset), so they stop
+ * being reported unreachable and retried forever.
+ * @param {import('./manager.js').HueManager} manager - The Hue manager.
+ * @returns {Promise<{ en: string, fr: string }>} Message shown under the button.
+ */
+export async function forgetBridgesAction(manager) {
+  if (manager.store.list().length === 0) {
+    return {
+      en: 'No Hue bridge paired, nothing to forget.',
+      fr: 'Aucun bridge Hue appairé, rien à oublier.',
+    };
+  }
+
+  const { forgotten, kept } = await manager.forgetUnreachableBridges();
+  if (forgotten.length === 0) {
+    return {
+      en: `Every paired bridge answers (${kept.length}): none was forgotten.`,
+      fr: `Tous les bridges appairés répondent (${kept.length}) : aucun n'a été oublié.`,
+    };
+  }
+
+  const ips = forgotten.map((bridge) => bridge.ip).join(', ');
+  const message = {
+    en: `Forgot ${forgotten.length} bridge(s) that did not answer: ${ips}. Their lights stay in Gladys: delete them from the Devices page if you no longer use them.`,
+    fr: `${forgotten.length} bridge(s) qui ne répondai(en)t pas oublié(s) : ${ips}. Leurs lampes restent dans Gladys : supprimez-les depuis la page Appareils si vous ne les utilisez plus.`,
+  };
+  if (manager.store.persistError) {
+    message.en += ` The change could NOT be saved (${manager.store.persistError.message}): the bridge(s) will come back after a restart.`;
+    message.fr += ` La modification n'a PAS pu être enregistrée (${manager.store.persistError.message}) : le(s) bridge(s) reviendra(ont) au redémarrage.`;
+  }
+  return message;
+}

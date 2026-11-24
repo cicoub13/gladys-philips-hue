@@ -4,6 +4,12 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
 
 ## [Unreleased]
 
+### Added
+
+- **Forget unreachable bridges** button in the Configuration screen: after
+  replacing a bridge or migrating to a Hue Bridge Pro, it forgets the old one,
+  which was otherwise reported unreachable forever.
+
 ### Fixed
 
 - Lights keep working after the bridge installs firmware 1.78 or later, which
@@ -12,6 +18,13 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
   failed and the bridge was reported unreachable.
 - New pairings use HTTPS whenever the bridge supports it, and plain HTTP only
   for the round v1 bridge.
+- A light powered off at the wall now shows as off in Gladys, with an
+  **unreachable** badge on the Devices page. Until now it stayed on, so scene
+  conditions such as "if the light is on" were wrong.
+- The color reported by a light no longer darkens as you dim it: a warm white at
+  low brightness used to show up as brown in the color picker.
+- The troubleshooting docs now explain that a bridge whose IP address changed
+  must be paired again: **Discover bridges** alone does not update it.
 
 ## [2.0.3] - 2026-10-29
 

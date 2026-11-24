@@ -1,6 +1,6 @@
 import { test, mock, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { discoverBridgesAction, pairBridgeAction } from '../src/actions.js';
+import { discoverBridgesAction, forgetBridgesAction, pairBridgeAction } from '../src/actions.js';
 import { resetDiscoveryCache } from '../src/hue/discovery.js';
 import { normalizeConfig } from '../src/config.js';
 
@@ -166,4 +166,51 @@ test('pairBridge blames the rejected address when there is no candidate because 
     }),
   );
   assert.match(message.en, /not a valid IP address/);
+});
+
+/**
+ * A manager stub for the "Forget unreachable bridges" button.
+ * @param {object} options - Stub options.
+ * @param {object[]} options.paired - Paired bridges.
+ * @param {object[]} [options.forgotten] - Bridges that did not answer.
+ * @param {Error} [options.persistError] - Store persistence failure.
+ * @returns {object} Manager stub.
+ */
+function makeForgetManager({ paired, forgotten = [], persistError }) {
+  return {
+    store: { persistError, list: () => paired },
+    async forgetUnreachableBridges() {
+      return { forgotten, kept: paired.filter((bridge) => !forgotten.includes(bridge)) };
+    },
+  };
+}
+
+test('forgetBridges names the bridges it forgot and says their lights stay', async () => {
+  const old = { id: 'b2', ip: '192.168.1.20' };
+  const message = await forgetBridgesAction(
+    makeForgetManager({ paired: [{ ip: '192.168.1.10' }, old], forgotten: [old] }),
+  );
+  assert.match(message.en, /Forgot 1 bridge\(s\) that did not answer: 192\.168\.1\.20\. Their lights stay/);
+  assert.match(message.fr, /192\.168\.1\.20/);
+});
+
+test('forgetBridges says when every bridge answers', async () => {
+  const message = await forgetBridgesAction(makeForgetManager({ paired: [{ ip: '192.168.1.10' }] }));
+  assert.match(message.en, /Every paired bridge answers \(1\): none was forgotten/);
+});
+
+test('forgetBridges without any paired bridge does nothing', async () => {
+  const manager = makeForgetManager({ paired: [] });
+  manager.forgetUnreachableBridges = () => assert.fail('nothing to check');
+  const message = await forgetBridgesAction(manager);
+  assert.match(message.en, /nothing to forget/);
+});
+
+test('forgetBridges warns when the removal could not be saved', async () => {
+  const old = { ip: '192.168.1.20' };
+  const message = await forgetBridgesAction(
+    makeForgetManager({ paired: [old], forgotten: [old], persistError: new Error('EACCES') }),
+  );
+  assert.match(message.en, /could NOT be saved \(EACCES\)/);
+  assert.match(message.fr, /PAS pu être enregistrée/);
 });

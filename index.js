@@ -19,7 +19,7 @@
 import { GladysIntegration, logger } from '@gladysassistant/integration-sdk';
 import { normalizeConfig } from './src/config.js';
 import { HueManager } from './src/manager.js';
-import { discoverBridgesAction, pairBridgeAction } from './src/actions.js';
+import { discoverBridgesAction, forgetBridgesAction, pairBridgeAction } from './src/actions.js';
 
 // Safety net: a rejection nobody handles is a bug. Log it where the user can
 // see it, then exit so the Gladys supervisor restarts from a clean state.
@@ -61,8 +61,21 @@ gladys.onAction('pair_bridge', () => {
   return pairBridgeAction(manager);
 });
 
+gladys.onAction('forget_bridges', () => {
+  logger.info('Action forget_bridges');
+  return forgetBridgesAction(manager);
+});
+
 // --- Scene actions (Gladys scene editor) -------------------------------------
 gladys.onSceneAction('activate_scene', (fields) => manager.activateScene(fields));
+
+// --- Devices created, updated or deleted by the user -------------------------
+// Their transport badge is sent again on the next refresh, like the SDK does
+// for their states: Gladys dropped the ones sent before the device existed.
+const forgetTransport = (device) => manager.forgetTransports(device.external_id);
+gladys.onDeviceCreated(forgetTransport);
+gladys.onDeviceUpdated(forgetTransport);
+gladys.onDeviceDeleted(forgetTransport);
 
 // --- Configuration updated by the user ---------------------------------------
 gladys.onConfigUpdated((newConfig) => {
@@ -77,6 +90,7 @@ gladys.on('connected', async () => {
   // re-created meanwhile): the next refresh sends every value again. The SDK
   // only forgets on device events, not on reconnection.
   gladys.forgetPublishedStates();
+  manager.forgetTransports();
   try {
     manager.setConfig(normalizeConfig(await gladys.getConfig()));
     await manager.syncDevices();

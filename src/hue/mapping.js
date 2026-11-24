@@ -6,9 +6,9 @@
 // and Gladys feature values -> Hue state payloads (for commands).
 //
 // Conversions implemented:
-//   - on/off      : Hue `on` boolean            <-> 0 / 1
+//   - on/off      : Hue `on` boolean            <-> 0 / 1 (0 while `reachable` is false)
 //   - brightness  : Hue `bri` 1..254            <-> 0..100 %
-//   - color       : Hue `xy` + `bri`            <-> single RGB integer
+//   - color       : Hue `xy` (full luminance)   <-> single RGB integer
 //   - temperature : Hue `ct` mireds (153..500)  <-> passthrough (mireds)
 //
 // The RGB <-> xy conversion uses the standard Philips "Wide RGB D65" gamma
@@ -146,16 +146,19 @@ export function rgbToXy(rgbInt) {
 }
 
 /**
- * Convert a Hue xy color coordinate (+ brightness) to an RGB integer.
+ * Convert a Hue xy color coordinate to an RGB integer, at full luminance.
+ *
+ * Brightness is its own feature: folding it into the color would darken it as
+ * the light dims (a warm white at 25 % read as brown), and make every brightness
+ * change publish a color change too.
  * @param {[number, number]} xy - The xy coordinate.
- * @param {number} [bri] - Hue brightness (1..254), used as the Y luminance.
  * @returns {number} RGB integer.
  */
-export function xyToRgb([x, y], bri = HUE_BRI_MAX) {
+export function xyToRgb([x, y]) {
   if (!y) {
     return 0;
   }
-  const Y = clamp(bri, HUE_BRI_MIN, HUE_BRI_MAX) / HUE_BRI_MAX;
+  const Y = 1;
   const X = (Y / y) * x;
   const Z = (Y / y) * (1 - x - y);
 
@@ -276,13 +279,16 @@ export function lightToDevicePayload(ids, light) {
 export function hueStateToFeatureStates(ids, light) {
   const caps = getCapabilities(light);
   const state = light.state || {};
-  const states = [{ external_id: ids.feature(FEATURE.ON_OFF), value: state.on ? 1 : 0 }];
+  // A light cut at the wall keeps its last state (`on: true`) on the bridge, with
+  // `reachable: false`: it is physically off.
+  const on = state.on && state.reachable !== false;
+  const states = [{ external_id: ids.feature(FEATURE.ON_OFF), value: on ? 1 : 0 }];
 
   if (caps.brightness && typeof state.bri === 'number') {
     states.push({ external_id: ids.feature(FEATURE.BRIGHTNESS), value: briToPercent(state.bri) });
   }
   if (caps.color && Array.isArray(state.xy)) {
-    states.push({ external_id: ids.feature(FEATURE.COLOR), value: xyToRgb(state.xy, state.bri) });
+    states.push({ external_id: ids.feature(FEATURE.COLOR), value: xyToRgb(state.xy) });
   }
   if (caps.temperature && typeof state.ct === 'number') {
     states.push({ external_id: ids.feature(FEATURE.TEMPERATURE), value: state.ct });

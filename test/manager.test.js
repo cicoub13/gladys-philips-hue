@@ -945,3 +945,119 @@ test('activateScene fails the action when the bridge refuses the scene', async (
   };
   await assert.rejects(() => manager.activateScene({ scene: 'Détente' }), /resource not available/);
 });
+
+test('a light cut at the wall gets the unreachable badge, and local once it is back', async () => {
+  const { manager, gladys, client } = await makeManager();
+  const deviceId = await createAll(manager, gladys);
+
+  await manager.pollLights();
+  assert.deepEqual(gladys.fake.transports, [{ device_external_id: deviceId, transport: 'local' }]);
+  await manager.pollLights();
+  assert.equal(gladys.fake.transports.length, 1, 'an unchanged badge is not sent again');
+
+  client.light.state = { ...client.light.state, on: true, reachable: false };
+  await manager.pollLights();
+  assert.deepEqual(gladys.fake.transports.at(-1), { device_external_id: deviceId, transport: 'unreachable' });
+  const onOff = gladys.fake.states.findLast((s) => s.device_feature_external_id === `${deviceId}:on-off`);
+  assert.equal(onOff.state, 0, 'the bridge says on, but the bulb has no power');
+
+  client.light.state = { ...client.light.state, reachable: true };
+  await manager.pollLights();
+  assert.deepEqual(gladys.fake.transports.at(-1), { device_external_id: deviceId, transport: 'local' });
+});
+
+test('the badge is sent again once forgotten (device event, reconnection)', async () => {
+  const { manager, gladys } = await makeManager();
+  const deviceId = await createAll(manager, gladys);
+  await manager.pollLights();
+
+  manager.forgetTransports(deviceId);
+  await manager.pollLights();
+  manager.forgetTransports();
+  await manager.pollLights();
+  assert.equal(gladys.fake.transports.length, 3);
+});
+
+test('no badge is sent for a light not created in Gladys', async () => {
+  const { manager, gladys } = await makeManager();
+  await manager.buildDiscoveredDevices();
+  const [entry] = manager.registry.values();
+  await manager.refreshLights(entry.bridgeIp, manager.clientFor(), [entry.hueId]);
+  assert.deepEqual(gladys.fake.transports, []);
+});
+
+test('a failed badge does not fail the refresh, and is retried', async () => {
+  const { manager, gladys } = await makeManager();
+  const deviceId = await createAll(manager, gladys);
+  const publish = mock.method(gladys, 'publishTransports', async () => {
+    throw new Error('HTTP 500');
+  });
+  await manager.pollLights();
+  assert.ok(gladys.fake.states.some((s) => s.device_feature_external_id === `${deviceId}:on-off`));
+
+  publish.mock.restore();
+  await manager.pollLights();
+  assert.deepEqual(gladys.fake.transports, [{ device_external_id: deviceId, transport: 'local' }]);
+});
+
+/**
+ * A manager with two paired bridges, each with its own fake client.
+ * @returns {Promise<object>} Manager, fake Gladys, store and clients by IP.
+ */
+async function makeTwoBridgeManager() {
+  const { manager, gladys, store } = await makeManager();
+  await store.upsert({ id: 'b2', ip: '192.168.1.20', username: 'user-2' });
+  const clients = { '192.168.1.10': makeFakeClient(), '192.168.1.20': makeFakeClient() };
+  manager.clientFor = (bridge) => clients[bridge.ip];
+  return { manager, gladys, store, clients };
+}
+
+test('forgetUnreachableBridges drops the bridges that no longer answer, and only them', async () => {
+  // The old bridge after a migration to a Bridge Pro: without this it stays
+  // stored forever, reported unreachable and retried in the background.
+  const { manager, gladys, store, clients } = await makeTwoBridgeManager();
+  clients['192.168.1.20'].down = true;
+  await manager.syncDevices();
+  assert.equal(gladys.fake.connectionStatus.connected, false);
+
+  const { forgotten, kept } = await manager.forgetUnreachableBridges();
+  assert.deepEqual(
+    forgotten.map((bridge) => bridge.ip),
+    ['192.168.1.20'],
+  );
+  assert.deepEqual(
+    kept.map((bridge) => bridge.ip),
+    ['192.168.1.10'],
+  );
+  assert.deepEqual(
+    store.list().map((bridge) => bridge.ip),
+    ['192.168.1.10'],
+  );
+  assert.equal(gladys.fake.connectionStatus.connected, true, 'no longer reported unreachable');
+  assert.equal(manager.resyncTimer, undefined, 'the background resync stopped');
+  assert.ok([...manager.registry.values()].every((entry) => entry.bridgeIp === '192.168.1.10'));
+
+  const reopened = new BridgeStore(store.file);
+  await reopened.load();
+  assert.equal(reopened.list().length, 1, 'the removal survives a restart');
+  manager.stop();
+});
+
+test('forgetUnreachableBridges keeps every bridge that answers', async () => {
+  const { manager, store } = await makeTwoBridgeManager();
+  const { forgotten } = await manager.forgetUnreachableBridges();
+  assert.deepEqual(forgotten, []);
+  assert.equal(store.list().length, 2);
+});
+
+test('forgetting the only bridge clears the Discovery tab', async () => {
+  const { manager, gladys, client } = await makeManager();
+  await manager.syncDevices();
+  assert.equal(gladys.fake.discoveredDevices.length, 1);
+
+  client.down = true;
+  await manager.forgetUnreachableBridges();
+  assert.deepEqual(gladys.fake.discoveredDevices, []);
+  assert.match(gladys.fake.connectionStatus.message.en, /No Hue bridge paired/);
+  manager.stop();
+});

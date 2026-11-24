@@ -145,6 +145,23 @@ export class BridgeStore {
   }
 
   /**
+   * Forget paired bridges, then persist. Like `upsert`, a write failure is kept
+   * in `persistError` instead of thrown: the bridges are gone for this session.
+   * @param {Array<object>} bridges - Entries of `list()` to remove.
+   * @returns {Promise<void>} Resolves once removed (persisted or in memory only).
+   */
+  async remove(bridges) {
+    this.bridges = this.bridges.filter((bridge) => !bridges.includes(bridge));
+    try {
+      await this.persist();
+      this.persistError = undefined;
+    } catch (error) {
+      this.persistError = error;
+      logger.error(`Could not save the paired bridges to ${this.file} (${error.message}) — removal is memory-only`);
+    }
+  }
+
+  /**
    * @returns {Array<{ id: string, ip: string, username: string }>} Paired bridges.
    */
   list() {

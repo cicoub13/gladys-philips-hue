@@ -110,6 +110,14 @@
         "fr": "Appairer le bridge (appuyez d'abord sur le bouton)"
       },
       "timeout_seconds": 20
+    },
+    {
+      "key": "forget_bridges",
+      "label": {
+        "en": "Forget unreachable bridges",
+        "fr": "Oublier les bridges injoignables"
+      },
+      "timeout_seconds": 30
     }
   ],
   "scene_actions": [

@@ -134,3 +134,19 @@ test('BridgeStore survives concurrent writes', async () => {
   await reopened.load();
   assert.equal(reopened.list().length, 2);
 });
+
+test('BridgeStore removes bridges and persists the removal', async () => {
+  const file = await tempFile();
+  const store = new BridgeStore(file);
+  await store.load();
+  await store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-1' });
+  await store.upsert({ id: 'b2', ip: '192.168.1.20', username: 'user-2' });
+
+  await store.remove([store.list()[1]]);
+  const reopened = new BridgeStore(file);
+  await reopened.load();
+  assert.deepEqual(
+    reopened.list().map((bridge) => bridge.id),
+    ['b1'],
+  );
+});
