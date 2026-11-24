@@ -98,12 +98,16 @@ certFingerprint?, platformKey? }], forgotten?: [{ id?, ip, platformKey }] }` (`f
   (`publishLightTransports`, created devices only, only on change, cache in `manager.transports`).
   `forgetUnreachableBridges()` (button `forget_bridges`) drops a stored bridge when its read gets an
   answer that `isGone()` (Hue error 1, any HTTP status but 429/5xx), or no answer while it was
-  already in `unreachable` before the click; it skips one re-paired during the probe. `store.remove()` keeps the `platformKey` of IP-keyed
+  already in `manager.silent` before the click (last read got no answer; a 429/5xx scan only puts it in
+  `unreachable`); a probe with no answer is recorded (`markBridge`), so the next click forgets it. It skips
+  one re-paired during the probe, and the resync after it reuses the probe reads (30 s action timeout). `store.remove()` keeps the `platformKey` of IP-keyed
   bridges in `forgotten`, given back by `upsert` on re-pairing. Results of calls to a bridge no longer
   stored are ignored (`markBridge`, end of `buildDiscoveredDevices`). Transports go through
-  `queueTransports` (one call at a time, cache written before the request, rolled back on failure).
+  `queueTransports` (one call at a time, cache written before the request, cleared on failure; failed entries wait in `pendingTransports`
+  and go out with the next call, at the latest at the end of `pollLights`).
   A bridge that does not answer, or is forgotten, gets the `unreachable` badge on its created lights,
-  found in `gladys.devices` by external_id prefix (`createdLightsOf`), not in the registry.
+  found in `gladys.devices` by external_id prefix (`createdLightsOf`), not in the registry. `resolve`
+  says when a device's bridge is no longer stored.
 
 ## Tests
 

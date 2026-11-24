@@ -248,7 +248,12 @@ test('a refresh that read a light before a command does not flip it back', async
 test('resolve throws a helpful error for an unknown device', async () => {
   const { manager } = await makeManager();
   await manager.buildDiscoveredDevices();
-  assert.throws(() => manager.resolve({ external_id: 'ext:test:light:nope' }), /run a scan/);
+  assert.throws(() => manager.resolve({ external_id: 'ext:test:light:b1-nope' }), /run a scan/);
+  // A light of a bridge that is no longer stored (forgotten): say so.
+  assert.throws(
+    () => manager.resolve({ external_id: 'ext:test:light:b9-nope' }),
+    /bridge of light .* no longer paired/,
+  );
 });
 
 test('resolve tells the user when the bridge is no longer paired', async () => {
@@ -949,6 +954,7 @@ test('activateScene fails the action when the bridge refuses the scene', async (
 test('a light cut at the wall gets the unreachable badge, and local once it is back', async () => {
   const { manager, gladys, client } = await makeManager();
   const deviceId = await createAll(manager, gladys);
+  client.getLights = async () => ({ 3: structuredClone(client.light) }); // a fresh object per read
 
   await manager.pollLights();
   assert.deepEqual(gladys.fake.transports, [{ device_external_id: deviceId, transport: 'local' }]);
@@ -957,6 +963,7 @@ test('a light cut at the wall gets the unreachable badge, and local once it is b
 
   client.light.state = { ...client.light.state, on: true, reachable: false };
   await manager.pollLights();
+  await manager.pollLights(); // two reads in a row
   assert.deepEqual(gladys.fake.transports.at(-1), { device_external_id: deviceId, transport: 'unreachable' });
   const onOff = gladys.fake.states.findLast((s) => s.device_feature_external_id === `${deviceId}:on-off`);
   assert.equal(onOff.state, 0, 'the bridge says on, but the bulb has no power');
@@ -1113,6 +1120,7 @@ test('a refresh still in flight when its bridge is forgotten does not bring it b
     throw new Error('connect EHOSTUNREACH');
   };
   manager.unreachable.add('192.168.1.20'); // it was already failing
+  manager.silent.add('192.168.1.20');
 
   await manager.forgetUnreachableBridges();
   failRead();
@@ -1374,4 +1382,104 @@ test('a command to a light cut at the wall reads it again, in case its power cam
   const onOff = gladys.fake.states.findLast((s) => s.device_feature_external_id === `${deviceId}:on-off`);
   assert.equal(onOff.state, 1);
   assert.equal(gladys.fake.transports.at(-1).transport, 'local');
+});
+
+test('a bridge that answered 503, then misses the probe, is not forgotten on the first click', async () => {
+  // A 503 during a scan marks it unreachable, but it did answer: it may be
+  // installing firmware, then rebooting.
+  const { manager, store, client } = await makeManager();
+  failReads(client, { message: 'HTTP 503', httpStatus: 503 });
+  await manager.syncDevices();
+  assert.equal(manager.unreachable.size, 1);
+
+  client.getLights = async () => {
+    throw new Error('connect ETIMEDOUT');
+  };
+  const { forgotten, busy } = await manager.forgetUnreachableBridges();
+  assert.deepEqual(forgotten, []);
+  assert.equal(busy.length, 1);
+  assert.equal(store.list().length, 1);
+  manager.stop();
+});
+
+test('a bridge nothing else reads is recorded by the probe, and forgotten on the next click', async () => {
+  // No created light: neither the refresh loop nor the resync reads it.
+  const { manager, gladys, store, clients } = await makeTwoBridgeManager();
+  await manager.syncDevices();
+  clients['192.168.1.20'].down = true;
+  await manager.pollLights();
+
+  const first = await manager.forgetUnreachableBridges();
+  assert.deepEqual(first.forgotten, []);
+  assert.equal(gladys.fake.connectionStatus.connected, false, 'now reported unreachable');
+  const second = await manager.forgetUnreachableBridges();
+  assert.deepEqual(
+    second.forgotten.map((bridge) => bridge.ip),
+    ['192.168.1.20'],
+  );
+  assert.equal(store.list().length, 1);
+  manager.stop();
+});
+
+test('the resync after Forget reuses the probe instead of reading the bridges again', async () => {
+  // A silent bridge costs ~16 s per read: reading it twice exceeds the action's 30 s.
+  const { manager, clients } = await makeTwoBridgeManager();
+  clients['192.168.1.20'].down = true;
+  await manager.syncDevices();
+  const reads = { a: countReads(clients['192.168.1.10']), b: countReads(clients['192.168.1.20']) };
+
+  const { forgotten } = await manager.forgetUnreachableBridges();
+  assert.equal(forgotten.length, 1);
+  assert.deepEqual([reads.a.count, reads.b.count], [1, 1]);
+  manager.stop();
+});
+
+test('a badge whose publication failed is sent again, even if Gladys applied it', async () => {
+  // A request that timed out may still have been applied: the cache must not
+  // go back to the previous value.
+  const { manager, gladys, client } = await makeManager();
+  const deviceId = await createAll(manager, gladys);
+  await manager.pollLights();
+  client.down = true;
+  const publish = gladys.publishTransports.bind(gladys);
+  mock.method(gladys, 'publishTransports', async (batch) => {
+    await publish(batch);
+    throw new Error('timeout');
+  });
+  await manager.pollLights();
+  mock.restoreAll();
+  assert.equal(gladys.fake.transports.at(-1).transport, 'unreachable');
+
+  client.down = false;
+  await manager.pollLights();
+  assert.deepEqual(gladys.fake.transports.at(-1), { device_external_id: deviceId, transport: 'local' });
+  manager.stop();
+});
+
+test('a failed badge of a forgotten bridge is sent again by the next poll', async () => {
+  // Nothing refreshes the lights of a forgotten bridge any more.
+  const { manager, gladys, client } = await makeManager();
+  const deviceId = await createAll(manager, gladys);
+  await manager.pollLights();
+  failReads(client, { message: 'unauthorized user', hueErrorType: 1 });
+  mock.method(gladys, 'publishTransports', async () => {
+    throw new Error('HTTP 503');
+  });
+  await manager.forgetUnreachableBridges();
+  mock.restoreAll();
+  assert.equal(gladys.fake.transports.at(-1).transport, 'local');
+
+  await manager.pollLights();
+  assert.deepEqual(gladys.fake.transports.at(-1), { device_external_id: deviceId, transport: 'unreachable' });
+  manager.stop();
+});
+
+test('an unexpected bridge body never makes a refresh reject', async () => {
+  // Scene and command callers do not await it: a rejection would stop the process.
+  const { manager, gladys, store, client } = await makeManager();
+  const deviceId = await createAll(manager, gladys);
+  client.getLights = async () => null;
+  const [entry] = manager.registry.values();
+  await manager.refreshLights(store.list()[0], client, [entry.hueId]);
+  assert.ok(deviceId);
 });

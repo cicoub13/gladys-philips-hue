@@ -164,10 +164,13 @@ export async function forgetBridgesAction(manager) {
           fr: ` ${busy.map((bridge) => bridge.ip).join(', ')} conservé(s) : occupé, en redémarrage ou injoignable depuis peu. S'il a vraiment disparu, réessayez dans une minute.`,
         }
       : { en: '', fr: '' };
+  if (forgotten.length === 0 && busy.length > 0) {
+    return { en: `No bridge forgotten.${busyNote.en}`, fr: `Aucun bridge oublié.${busyNote.fr}` };
+  }
   if (forgotten.length === 0) {
     return {
-      en: `No bridge to forget: every paired bridge (${kept.length}) answers.${busyNote.en}`,
-      fr: `Aucun bridge à oublier : tous les bridges appairés (${kept.length}) répondent.${busyNote.fr}`,
+      en: `No bridge to forget: every paired bridge (${kept.length}) answers.`,
+      fr: `Aucun bridge à oublier : tous les bridges appairés (${kept.length}) répondent.`,
     };
   }
 
