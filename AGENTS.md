@@ -102,9 +102,9 @@ ip` + `-` prefix), not by `entry.bridgeIp`; `callBridge`/`markBridge` take the b
   `forgetUnreachableBridges()` (button `forget_bridges`) drops a stored bridge when its read gets an
   answer that `isGone()` (Hue error 1, any HTTP status but 429/5xx), or no answer after
   `SILENT_FORGET_MS` (5 min) of none (`manager.silentSince`, keyed by `platformKeyOf`; a 429/5xx answer
-  only puts it in `unreachable`). The probe is recorded like any read (`markBridge`). It skips one
-  re-paired during the probe, and the resync after it reuses the probe reads of the unchanged bridges
-  (30 s action timeout). `store.remove()` keeps every forgotten bridge in `forgotten` (with the
+  only puts it in `unreachable`). The probe is recorded like any read (`markBridge`). Forget and the
+  store part of pairing share a lock (`manager.exclusive`), so no bridge is re-paired during the probe,
+  and the resync after it reuses the probe reads (30 s action timeout). `store.remove()` keeps every forgotten bridge in `forgotten` (with the
   `platformKey` of IP-keyed ones); `upsert` matches it by id first, then an id-less one by IP. Results of calls to a bridge no longer
   stored are ignored (`markBridge`, end of `buildDiscoveredDevices`). Transports go through
   `queueTransports` (one call at a time, cache written before the request, cleared on failure; failed

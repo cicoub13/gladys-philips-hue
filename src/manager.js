@@ -150,6 +150,21 @@ export class HueManager {
     this.transportQueue = Promise.resolve();
     /** @type {Map<string, string>} Transports whose publication failed, sent again with the next ones. */
     this.pendingTransports = new Map();
+    // Tail of the lock shared by Forget and pairing (see `exclusive`).
+    this.bridgeLock = Promise.resolve();
+  }
+
+  /**
+   * Run a task that changes the stored bridges once the previous one is done.
+   * Forget and pairing share it: a bridge is never paired again while Forget is
+   * deciding whether to drop it.
+   * @param {() => Promise<any>} task - The task.
+   * @returns {Promise<any>} The task's result.
+   */
+  exclusive(task) {
+    const run = this.bridgeLock.then(task);
+    this.bridgeLock = run.catch(() => {});
+    return run;
   }
 
   /**
@@ -956,44 +971,44 @@ export class HueManager {
    * minutes; a 429/5xx answer is not "no answer"). The probe is recorded like
    * any read, so that a later click can forget a bridge nothing else reads. Any
    * other failure keeps the bridge, in `busy`. Their lights stay in Gladys, for
-   * the user to delete, with the `unreachable` badge.
+   * the user to delete, with the `unreachable` badge. Runs under the lock it
+   * shares with pairing, so no bridge is paired again while it runs.
    *
    * Never rejects once bridges are removed: what follows the removal is
    * best-effort, and the caller must report what was forgotten.
    * @returns {Promise<{ forgotten: object[], kept: object[], busy: object[], saveError?: Error }>} Bridges
    * forgotten, kept (`busy` among them), and the error of saving the removal, if any.
    */
-  async forgetUnreachableBridges() {
+  forgetUnreachableBridges() {
+    return this.exclusive(() => this.forgetGoneBridges());
+  }
+
+  /**
+   * The body of `forgetUnreachableBridges`, run under the bridge lock.
+   * @returns {Promise<{ forgotten: object[], kept: object[], busy: object[], saveError?: Error }>} See
+   * `forgetUnreachableBridges`.
+   */
+  async forgetGoneBridges() {
     const silentSince = new Map(this.silentSince);
-    // What each bridge was when probed: a pairing during the probe updates the
-    // stored entry in place (new address, new username), and must survive.
-    const probed = this.store.list().map((bridge) => ({ bridge, ip: bridge.ip, username: bridge.username }));
+    const bridges = [...this.store.list()];
     // In parallel: each dead bridge costs a full timeout (~16 s with the retry).
-    const reads = probed.map(({ bridge }) => this.clientFor(bridge).getLights());
+    const reads = bridges.map((bridge) => this.clientFor(bridge).getLights());
     const results = await Promise.allSettled(reads);
     const forgotten = [];
     const kept = [];
     const busy = [];
-    const unchanged = probed.map(({ bridge, ip, username }) => bridge.ip === ip && bridge.username === username);
     for (const [index, result] of results.entries()) {
-      const { bridge, ip } = probed[index];
-      if (!this.store.list().includes(bridge)) {
-        continue; // removed meanwhile
-      }
-      if (!unchanged[index]) {
-        kept.push(bridge); // re-paired during the probe: what it read is stale
-        continue;
-      }
+      const bridge = bridges[index];
       const { reason } = result;
       const since = silentSince.get(platformKeyOf(bridge));
       const longSilent = since !== undefined && Date.now() - since >= SILENT_FORGET_MS;
       if (result.status === 'rejected' && (isGone(reason) || (isUnreachable(reason) && longSilent))) {
-        logger.info(`Forgetting bridge ${ip}: ${reason.message}`);
+        logger.info(`Forgetting bridge ${bridge.ip}: ${reason.message}`);
         forgotten.push(bridge);
         continue;
       }
       if (result.status === 'rejected') {
-        logger.info(`Keeping bridge ${ip}, which may only be busy or restarting: ${reason.message}`);
+        logger.info(`Keeping bridge ${bridge.ip}, which may only be busy or restarting: ${reason.message}`);
         busy.push(bridge);
       }
       kept.push(bridge);
@@ -1027,11 +1042,9 @@ export class HueManager {
         await this.markLightsUnreachable(bridge);
       }
       // Even if no bridge answers: the previous list holds the forgotten lights.
-      // From the probe's reads (of the bridges that did not change meanwhile):
-      // reading again would push the action past its 30 s timeout when a bridge
-      // does not answer.
-      const fresh = probed.flatMap(({ bridge }, index) => (unchanged[index] ? [[bridge, reads[index]]] : []));
-      await this.syncDevices({ force: true, reads: new Map(fresh) });
+      // From the probe's reads: reading again would push the action past its
+      // 30 s timeout when a bridge does not answer.
+      await this.syncDevices({ force: true, reads: new Map(bridges.map((bridge, index) => [bridge, reads[index]])) });
     } catch (error) {
       logger.warn(`Could not resynchronize after forgetting bridges: ${error.message}`);
       await this.reportStatus(true).catch((statusError) =>
@@ -1079,7 +1092,18 @@ export class HueManager {
   async pairBridges() {
     const { bridges, ignored } = await this.identifiedBridges();
     const result = { paired: [], pending: [], unreachable: [], notABridge: ignored };
+    // Only the store change waits for a running Forget: discovery above does not.
+    await this.exclusive(() => this.pairIdentified(bridges, result));
+    return result;
+  }
 
+  /**
+   * The store part of `pairBridges`, run under the bridge lock.
+   * @param {Array<object>} bridges - Identified bridges.
+   * @param {{ paired: object[], pending: object[], unreachable: object[] }} result - Filled in place.
+   * @returns {Promise<void>} Resolves once every bridge was tried.
+   */
+  async pairIdentified(bridges, result) {
     for (const bridge of bridges) {
       // Reuse what identification already learned: the scheme that answered and
       // the certificate pinned on the way.
@@ -1107,6 +1131,5 @@ export class HueManager {
         }
       }
     }
-    return result;
   }
 }

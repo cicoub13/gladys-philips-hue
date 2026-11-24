@@ -1157,20 +1157,6 @@ test('with no bridge left, nothing stays unreachable', async () => {
   manager.stop();
 });
 
-test('a bridge paired again while Forget probes it is kept', async () => {
-  // The user clicks Forget, then pairs the same bridge at its new address
-  // before the probe of the old one times out.
-  const { manager, store, client } = await makeManager();
-  client.getLights = async () => {
-    await store.upsert({ id: 'b1', ip: '192.168.1.99', username: 'fresh-user' });
-    throw new Error('connect EHOSTUNREACH');
-  };
-
-  const { forgotten } = await manager.forgetUnreachableBridges();
-  assert.deepEqual(forgotten, []);
-  assert.equal(store.list()[0].username, 'fresh-user');
-});
-
 test('Forget still reports what it did when the resync after it fails', async () => {
   const { manager, gladys, client } = await makeManager();
   client.down = true;
@@ -1572,33 +1558,6 @@ test('the refresh of a bridge only covers its own lights, not those of another b
   manager.stop();
 });
 
-test('a bridge re-paired at a new address during the probe keeps its lights after Forget', async () => {
-  const { manager, gladys, store } = await makeManager();
-  await store.upsert({ id: 'b2', ip: '192.168.1.20', username: 'user-2' });
-  const clients = { b1: makeFakeClient(), b2: makeFakeClient() };
-  manager.clientFor = (bridge) => clients[bridge.id];
-  clients.b2.down = true;
-  await manager.syncDevices();
-  silentForLong(manager);
-  const read = clients.b1.getLights;
-  clients.b1.getLights = async () => {
-    clients.b1.getLights = read; // only the probe of the old address fails
-    await store.upsert({ id: 'b1', ip: '192.168.1.99', username: 'user-1' });
-    throw new Error('connect EHOSTUNREACH');
-  };
-
-  const { forgotten } = await manager.forgetUnreachableBridges();
-  assert.deepEqual(
-    forgotten.map((bridge) => bridge.id),
-    ['b2'],
-  );
-  assert.deepEqual([...manager.unreachable], []);
-  assert.ok(manager.registry.has('ext:test:light:b1-00:17:88:01:aa'));
-  assert.equal(gladys.fake.discoveredDevices.length, 1);
-  assert.equal(gladys.fake.connectionStatus.connected, true);
-  manager.stop();
-});
-
 test('a probe that succeeds clears the unreachable status', async () => {
   const { manager, gladys, client } = await makeManager();
   client.down = true;
@@ -1635,4 +1594,48 @@ test('a badge call that rejects does not block the next ones', async () => {
   await assert.rejects(() => manager.queueTransports([]));
   await manager.pollLights();
   assert.deepEqual(gladys.fake.transports, [{ device_external_id: deviceId, transport: 'local' }]);
+});
+
+test('pairing waits for a running Forget, so the bridge it pairs again is kept', async () => {
+  // The user clicks Forget, then pairs the same bridge at its new address
+  // before the probe of the old one times out.
+  const { manager, store, client } = await makeManager();
+  client.down = true;
+  await manager.syncDevices();
+  silentForLong(manager);
+  let answer;
+  client.getLights = () =>
+    new Promise((resolve, reject) => {
+      answer = () => reject(new Error('connect EHOSTUNREACH'));
+    });
+  manager.identifiedBridges = async () => ({
+    bridges: [{ ...IDENTIFIED_BRIDGE, id: 'b1', ip: '192.168.1.99' }],
+    ignored: [],
+  });
+  mock.method(global, 'fetch', async () => ({
+    ok: true,
+    status: 200,
+    json: async () => [{ success: { username: 'fresh-user' } }],
+  }));
+  try {
+    const forget = manager.forgetUnreachableBridges();
+    await settle();
+    const pair = manager.pairBridges();
+    await settle();
+    assert.equal(store.list()[0].username, 'user-1', 'the pairing waits for Forget');
+
+    answer();
+    const { forgotten } = await forget;
+    const { paired } = await pair;
+    assert.equal(forgotten.length, 1, 'the old credentials are forgotten');
+    assert.equal(paired.length, 1);
+    assert.deepEqual(
+      store.list().map((bridge) => [bridge.id, bridge.ip, bridge.username]),
+      [['b1', '192.168.1.99', 'fresh-user']],
+      'the fresh pairing survives',
+    );
+  } finally {
+    mock.restoreAll();
+    manager.stop();
+  }
 });

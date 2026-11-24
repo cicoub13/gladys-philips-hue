@@ -21,6 +21,12 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
 - A light powered off at the wall now shows as off in Gladys, with an
   **unreachable** badge on the Devices page. Until now it stayed on, so scene
   conditions such as "if the light is on" were wrong.
+- Every light created in Gladys now shows a **local** badge on the Devices page
+  while its bridge answers.
+- When a bridge stops answering, its lights get the **unreachable** badge until
+  it answers again. Until now they kept looking available.
+- The lights of a bridge that does not answer stay in the **Discovery** tab.
+  Until now they disappeared from it until the bridge answered again.
 - The color reported by a light no longer darkens as you dim it: a warm white at
   low brightness used to show up as brown in the color picker.
 - The troubleshooting docs now explain that a bridge whose IP address changed
