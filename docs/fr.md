@@ -73,8 +73,8 @@ la scène Gladys continue de s'exécuter.
 Après avoir remplacé votre bridge ou migré vers un Hue Bridge Pro, appairez le
 nouveau (étapes ci-dessus), puis cliquez sur **Oublier les bridges
 injoignables** : l'intégration oublie tous les bridges appairés qui ne répondent
-plus, et cesse de les signaler injoignables. Un bridge qui répond n'est jamais
-oublié. Les lampes du nouveau bridge apparaissent comme de nouveaux appareils
+plus, ou n'acceptent plus l'intégration, et cesse de les signaler injoignables.
+Un bridge qui fonctionne n'est jamais oublié, même s'il est occupé. Les lampes du nouveau bridge apparaissent comme de nouveaux appareils
 dans l'onglet **Découverte** ; supprimez les anciens depuis la page Appareils.
 
 ## Comment le bridge est trouvé
@@ -131,7 +131,10 @@ l'appairage manque. Appuyez sur le bouton rond du bridge, puis recliquez sur
 **Découvrir les bridges** ne met pas à jour l'adresse d'un bridge déjà appairé :
 appuyez sur le bouton du bridge, puis recliquez sur **Appairer le bridge**. Vos
 lampes gardent leurs appareils dans Gladys. Fixez ensuite l'adresse du bridge
-dans votre box pour qu'elle ne change plus.
+dans votre box pour qu'elle ne change plus. Une exception : un bridge appairé
+avec la version 1.1.0 ou antérieure via **Adresse IP du bridge**, que
+l'intégration n'a pas joint depuis sa mise à jour, revient avec de nouveaux
+appareils.
 
 **Les lampes ne répondent plus après une mise à jour du bridge** : depuis le
 firmware 1.78, le bridge refuse le HTTP simple. Un bridge appairé en HTTP passe
@@ -146,8 +149,9 @@ qu'il est absent, une commande peut échouer avec
 `Hue bridge unreachable: light … will be available again as soon as the bridge answers`.
 L'intégration continue d'essayer en arrière-plan, et les lampes reviennent
 d'elles-mêmes dès que le bridge répond. Si ce bridge a disparu pour de bon
-(remplacé, réinitialisé), cliquez sur **Oublier les bridges injoignables** (voir
-« Remplacer un bridge »).
+(remplacé, migré vers un Hue Bridge Pro), cliquez sur **Oublier les bridges
+injoignables** (voir « Remplacer un bridge »). Un bridge réinitialisé n'a besoin
+que d'être appairé à nouveau.
 
 **« Un bridge Hue a été trouvé mais n'a pas pu être appairé »** : le bridge a
 répondu à la découverte, puis a échoué pendant l'appairage. Vérifiez qu'il reste

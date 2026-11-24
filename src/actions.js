@@ -156,22 +156,29 @@ export async function forgetBridgesAction(manager) {
     };
   }
 
-  const { forgotten, kept } = await manager.forgetUnreachableBridges();
+  const { forgotten, kept, busy, saveError } = await manager.forgetUnreachableBridges();
+  const busyNote =
+    busy.length > 0
+      ? {
+          en: ` Kept ${busy.map((bridge) => bridge.ip).join(', ')}: it answered, but with an error (busy or restarting).`,
+          fr: ` ${busy.map((bridge) => bridge.ip).join(', ')} conservé(s) : il a répondu, mais avec une erreur (occupé ou en redémarrage).`,
+        }
+      : { en: '', fr: '' };
   if (forgotten.length === 0) {
     return {
-      en: `Every paired bridge answers (${kept.length}): none was forgotten.`,
-      fr: `Tous les bridges appairés répondent (${kept.length}) : aucun n'a été oublié.`,
+      en: `No bridge to forget: every paired bridge (${kept.length}) answers.${busyNote.en}`,
+      fr: `Aucun bridge à oublier : tous les bridges appairés (${kept.length}) répondent.${busyNote.fr}`,
     };
   }
 
   const ips = forgotten.map((bridge) => bridge.ip).join(', ');
   const message = {
-    en: `Forgot ${forgotten.length} bridge(s) that did not answer: ${ips}. Their lights stay in Gladys: delete them from the Devices page if you no longer use them.`,
-    fr: `${forgotten.length} bridge(s) qui ne répondai(en)t pas oublié(s) : ${ips}. Leurs lampes restent dans Gladys : supprimez-les depuis la page Appareils si vous ne les utilisez plus.`,
+    en: `Forgot ${forgotten.length} bridge(s) that no longer answer: ${ips}. Their lights stay in Gladys: delete them from the Devices page if you no longer use them.${busyNote.en}`,
+    fr: `${forgotten.length} bridge(s) qui ne répond(ent) plus oublié(s) : ${ips}. Leurs lampes restent dans Gladys : supprimez-les depuis la page Appareils si vous ne les utilisez plus.${busyNote.fr}`,
   };
-  if (manager.store.persistError) {
-    message.en += ` The change could NOT be saved (${manager.store.persistError.message}): the bridge(s) will come back after a restart.`;
-    message.fr += ` La modification n'a PAS pu être enregistrée (${manager.store.persistError.message}) : le(s) bridge(s) reviendra(ont) au redémarrage.`;
+  if (saveError) {
+    message.en += ` The change could NOT be saved (${saveError.message}): the bridge(s) will come back after a restart.`;
+    message.fr += ` La modification n'a PAS pu être enregistrée (${saveError.message}) : le(s) bridge(s) reviendra(ont) au redémarrage.`;
   }
   return message;
 }

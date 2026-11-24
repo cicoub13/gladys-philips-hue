@@ -93,8 +93,13 @@ certFingerprint?, platformKey? }] }`. Atomic write via `.tmp` + rename; a failed
   nothing re-discovers a moved bridge automatically, re-pairing updates the ip (`upsert` keyed by id).
 - A light with `state.reachable: false` (cut at the wall) is published off, with the `unreachable`
   transport badge (`publishLightTransports`, created devices only, only on change, cache in
-  `manager.transports`). `forgetUnreachableBridges()` (button `forget_bridges`) drops every stored
-  bridge whose `getLights()` fails, never one that answers.
+  `manager.transports`). `forgetUnreachableBridges()` (button `forget_bridges`) drops a stored
+  bridge only when its read fails with `isGone()` (no answer, Hue error 1, 404), never on 429/5xx,
+  and skips one re-paired during the probe. `store.remove()` keeps the `platformKey` of IP-keyed
+  bridges in `forgotten`, given back by `upsert` on re-pairing. Results of calls to a bridge no longer
+  stored are ignored (`markBridge`, end of `buildDiscoveredDevices`). Transports go through
+  `queueTransports` (one call at a time, cache written before the request, rolled back on failure).
+  A bridge that does not answer, or is forgotten, gets the `unreachable` badge on its created lights.
 
 ## Tests
 

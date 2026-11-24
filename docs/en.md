@@ -69,8 +69,9 @@ running.
 
 After replacing your bridge or migrating to a Hue Bridge Pro, pair the new one
 (steps above), then click **Forget unreachable bridges**: the integration
-forgets every paired bridge that no longer answers, so it stops reporting it
-unreachable. A bridge that answers is never forgotten. The lights of the new
+forgets every paired bridge that no longer answers, or no longer accepts the
+integration, so it stops reporting it unreachable. A bridge that still works is
+never forgotten, even a busy one. The lights of the new
 bridge appear as new devices in the **Discovery** tab; delete the old ones from
 the Devices page.
 
@@ -124,7 +125,9 @@ again within the next 30 seconds.
 **Discover bridges** does not update the address of a paired bridge: press the
 link button on the bridge, then click **Pair bridge** again. Your lights keep
 their devices in Gladys. Then reserve the bridge address in your router so it
-does not change again.
+does not change again. One exception: a bridge paired with version 1.1.0 or
+earlier through **Bridge IP address**, that the integration has not reached
+since you updated it, comes back with new devices.
 
 **Lights stopped responding after a bridge firmware update**: since firmware
 1.78, the bridge refuses plain HTTP. A bridge paired over HTTP is switched to
@@ -138,8 +141,9 @@ as Gladys."** in the connection status: the paired bridge no longer answers.
 While it is away, a command may fail with `Hue bridge unreachable: light … will be
 available again as soon as the bridge answers`. The integration keeps trying in
 the background, and the lights come back on their own once the bridge answers.
-If that bridge is gone for good (replaced, reset), click **Forget unreachable
-bridges** (see "Replacing a bridge").
+If that bridge is gone for good (replaced, migrated to a Hue Bridge Pro), click
+**Forget unreachable bridges** (see "Replacing a bridge"). A bridge that was
+reset only needs to be paired again.
 
 **"A Hue bridge was found but could not be paired"**: the bridge answered
 discovery, then failed during pairing. Check that it stays reachable from

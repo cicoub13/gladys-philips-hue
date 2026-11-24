@@ -1061,3 +1061,157 @@ test('forgetting the only bridge clears the Discovery tab', async () => {
   assert.match(gladys.fake.connectionStatus.message.en, /No Hue bridge paired/);
   manager.stop();
 });
+
+/**
+ * Make a fake client fail its reads with a given error.
+ * @param {object} client - Fake bridge client.
+ * @param {Partial<Error & { httpStatus: number, hueErrorType: number }>} fields - Error fields.
+ */
+function failReads(client, fields) {
+  client.getLights = async () => {
+    throw Object.assign(new Error(fields.message || 'failed'), fields);
+  };
+}
+
+test('a busy bridge is never forgotten, a reset one is', async () => {
+  // A bridge under load answers 503: forgetting it would cost the user a new
+  // pairing. One that no longer knows our username (reset, migrated) is gone.
+  const { manager, store, clients } = await makeTwoBridgeManager();
+  failReads(clients['192.168.1.10'], { message: 'HTTP 503', httpStatus: 503 });
+  failReads(clients['192.168.1.20'], { message: 'unauthorized user', hueErrorType: 1 });
+
+  const { forgotten, busy } = await manager.forgetUnreachableBridges();
+  assert.deepEqual(
+    forgotten.map((bridge) => bridge.ip),
+    ['192.168.1.20'],
+  );
+  assert.deepEqual(
+    busy.map((bridge) => bridge.ip),
+    ['192.168.1.10'],
+  );
+  assert.deepEqual(
+    store.list().map((bridge) => bridge.ip),
+    ['192.168.1.10'],
+  );
+  manager.stop();
+});
+
+test('a refresh still in flight when its bridge is forgotten does not bring it back', async () => {
+  const { manager, gladys, clients } = await makeTwoBridgeManager();
+  await createAll(manager, gladys);
+  let failRead;
+  clients['192.168.1.20'].getLights = () =>
+    new Promise((resolve, reject) => {
+      failRead = () => reject(new Error('connect EHOSTUNREACH'));
+    });
+  const poll = manager.pollLights();
+  await settle();
+  clients['192.168.1.20'].down = true;
+  const dead = clients['192.168.1.20'];
+  dead.getLights = async () => {
+    throw new Error('connect EHOSTUNREACH');
+  };
+
+  await manager.forgetUnreachableBridges();
+  failRead();
+  await poll;
+  assert.equal(manager.unreachable.size, 0);
+  assert.equal(gladys.fake.connectionStatus.connected, true);
+  assert.equal(manager.resyncTimer, undefined);
+  manager.stop();
+});
+
+test('with no bridge left, nothing stays unreachable', async () => {
+  const { manager, client, store } = await makeManager();
+  client.down = true;
+  await manager.syncDevices();
+  assert.equal(manager.unreachable.size, 1);
+
+  store.bridges.length = 0;
+  await manager.syncDevices();
+  assert.equal(manager.unreachable.size, 0);
+  assert.equal(manager.resyncTimer, undefined);
+  manager.stop();
+});
+
+test('a bridge paired again while Forget probes it is kept', async () => {
+  // The user clicks Forget, then pairs the same bridge at its new address
+  // before the probe of the old one times out.
+  const { manager, store, client } = await makeManager();
+  client.getLights = async () => {
+    await store.upsert({ id: 'b1', ip: '192.168.1.99', username: 'fresh-user' });
+    throw new Error('connect EHOSTUNREACH');
+  };
+
+  const { forgotten } = await manager.forgetUnreachableBridges();
+  assert.deepEqual(forgotten, []);
+  assert.equal(store.list()[0].username, 'fresh-user');
+});
+
+test('Forget still reports what it did when the resync after it fails', async () => {
+  const { manager, gladys, client } = await makeManager();
+  client.down = true;
+  mock.method(gladys, 'publishDiscoveredDevices', async () => {
+    throw new Error('HTTP 500');
+  });
+  try {
+    const { forgotten } = await manager.forgetUnreachableBridges();
+    assert.equal(forgotten.length, 1);
+    assert.match(gladys.fake.connectionStatus.message.en, /No Hue bridge paired/, 'the status was still reported');
+  } finally {
+    mock.restoreAll();
+    manager.stop();
+  }
+});
+
+test('the lights of a forgotten bridge, and of a bridge that does not answer, get the unreachable badge', async () => {
+  const { manager, gladys, clients } = await makeTwoBridgeManager();
+  await createAll(manager, gladys);
+  await manager.pollLights();
+  const transportOf = (ip) =>
+    gladys.fake.transports.findLast((entry) =>
+      entry.device_external_id.includes(ip === '192.168.1.10' ? ':b1-' : ':b2-'),
+    ).transport;
+  assert.equal(transportOf('192.168.1.10'), 'local');
+
+  clients['192.168.1.10'].down = true;
+  await manager.pollLights();
+  assert.equal(transportOf('192.168.1.10'), 'unreachable', 'its bridge does not answer');
+  clients['192.168.1.10'].down = false;
+  await manager.pollLights();
+  assert.equal(transportOf('192.168.1.10'), 'local', 'back with its bridge');
+
+  clients['192.168.1.20'].down = true;
+  await manager.forgetUnreachableBridges();
+  assert.equal(transportOf('192.168.1.20'), 'unreachable', 'nothing will refresh it again');
+  manager.stop();
+});
+
+test('a badge forgotten while it is being sent is sent again', async () => {
+  const { manager, gladys } = await makeManager();
+  const deviceId = await createAll(manager, gladys);
+  const publish = gladys.publishTransports.bind(gladys);
+  mock.method(gladys, 'publishTransports', async (batch) => {
+    manager.forgetTransports(deviceId); // the user updates the device meanwhile
+    return publish(batch);
+  });
+  await manager.pollLights();
+  mock.restoreAll();
+  await manager.pollLights();
+  assert.equal(gladys.fake.transports.length, 2);
+});
+
+test('a command to a light cut at the wall does not show it on', async () => {
+  // The bridge accepts it, but the bulb has no power.
+  const { manager, gladys, client } = await makeManager();
+  const deviceId = await createAll(manager, gladys);
+  client.light.state = { ...client.light.state, on: false, reachable: false };
+  await manager.pollLights();
+  const before = gladys.fake.states.length;
+
+  await manager.setValue({ external_id: deviceId }, { external_id: `${deviceId}:on-off` }, 1);
+  await manager.setValue({ external_id: deviceId }, { external_id: `${deviceId}:brightness` }, 50);
+  const echoed = gladys.fake.states.slice(before);
+  assert.ok(echoed.every((state) => state.device_feature_external_id !== `${deviceId}:on-off`));
+  assert.ok(echoed.some((state) => state.device_feature_external_id === `${deviceId}:brightness`));
+});

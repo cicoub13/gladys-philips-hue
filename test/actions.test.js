@@ -172,15 +172,18 @@ test('pairBridge blames the rejected address when there is no candidate because 
  * A manager stub for the "Forget unreachable bridges" button.
  * @param {object} options - Stub options.
  * @param {object[]} options.paired - Paired bridges.
- * @param {object[]} [options.forgotten] - Bridges that did not answer.
- * @param {Error} [options.persistError] - Store persistence failure.
+ * @param {object[]} [options.forgotten] - Bridges gone for good.
+ * @param {object[]} [options.busy] - Bridges that answered with an error.
+ * @param {Error} [options.saveError] - Failure to save the removal.
+ * @param {Error} [options.persistError] - Last store failure, whatever wrote.
  * @returns {object} Manager stub.
  */
-function makeForgetManager({ paired, forgotten = [], persistError }) {
+function makeForgetManager({ paired, forgotten = [], busy = [], saveError, persistError }) {
   return {
     store: { persistError, list: () => paired },
     async forgetUnreachableBridges() {
-      return { forgotten, kept: paired.filter((bridge) => !forgotten.includes(bridge)) };
+      const kept = paired.filter((bridge) => !forgotten.includes(bridge));
+      return { forgotten, kept, busy, ...(saveError ? { saveError } : {}) };
     },
   };
 }
@@ -190,13 +193,20 @@ test('forgetBridges names the bridges it forgot and says their lights stay', asy
   const message = await forgetBridgesAction(
     makeForgetManager({ paired: [{ ip: '192.168.1.10' }, old], forgotten: [old] }),
   );
-  assert.match(message.en, /Forgot 1 bridge\(s\) that did not answer: 192\.168\.1\.20\. Their lights stay/);
+  assert.match(message.en, /Forgot 1 bridge\(s\) that no longer answer: 192\.168\.1\.20\. Their lights stay/);
   assert.match(message.fr, /192\.168\.1\.20/);
 });
 
 test('forgetBridges says when every bridge answers', async () => {
   const message = await forgetBridgesAction(makeForgetManager({ paired: [{ ip: '192.168.1.10' }] }));
-  assert.match(message.en, /Every paired bridge answers \(1\): none was forgotten/);
+  assert.match(message.en, /No bridge to forget: every paired bridge \(1\) answers\.$/);
+});
+
+test('forgetBridges says which busy bridge it kept', async () => {
+  const busy = { ip: '192.168.1.10' };
+  const message = await forgetBridgesAction(makeForgetManager({ paired: [busy], busy: [busy] }));
+  assert.match(message.en, /Kept 192\.168\.1\.10: it answered, but with an error/);
+  assert.match(message.fr, /192\.168\.1\.10 conservé/);
 });
 
 test('forgetBridges without any paired bridge does nothing', async () => {
@@ -209,8 +219,17 @@ test('forgetBridges without any paired bridge does nothing', async () => {
 test('forgetBridges warns when the removal could not be saved', async () => {
   const old = { ip: '192.168.1.20' };
   const message = await forgetBridgesAction(
-    makeForgetManager({ paired: [old], forgotten: [old], persistError: new Error('EACCES') }),
+    makeForgetManager({ paired: [old], forgotten: [old], saveError: new Error('EACCES') }),
   );
   assert.match(message.en, /could NOT be saved \(EACCES\)/);
   assert.match(message.fr, /PAS pu être enregistrée/);
+});
+
+test('forgetBridges does not blame the removal for another failed write', async () => {
+  // The resync after the removal may fail to save something else.
+  const old = { ip: '192.168.1.20' };
+  const message = await forgetBridgesAction(
+    makeForgetManager({ paired: [old], forgotten: [old], persistError: new Error('EACCES') }),
+  );
+  assert.doesNotMatch(message.en, /could NOT be saved/);
 });
