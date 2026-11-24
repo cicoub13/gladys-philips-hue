@@ -205,7 +205,7 @@ test('forgetBridges says when every bridge answers', async () => {
 test('forgetBridges says which busy bridge it kept', async () => {
   const busy = { ip: '192.168.1.10' };
   const message = await forgetBridgesAction(makeForgetManager({ paired: [busy], busy: [busy] }));
-  assert.match(message.en, /Kept 192\.168\.1\.10: it answered, but with an error/);
+  assert.match(message.en, /Kept 192\.168\.1\.10: busy, restarting or only just stopped answering/);
   assert.match(message.fr, /192\.168\.1\.10 conservé/);
 });
 

@@ -65,9 +65,10 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
   IP-based. `store.upsert()` freezes the old IP as `platformKey` when the id is learned
   (`manager.learnBridgeId()`); never drop this fallback.
 - Capabilities come from the Hue `type` string (`getCapabilities`). Conversions: `bri` 1..254 ↔ 1..100 %
-  (never reports 0 %, since 0 % means "off" on commands); color RGB int ↔ `xy` (+`bri`); temperature is
+  (never reports 0 %, since 0 % means "off" on commands); color RGB int ↔ `xy` (read at full luminance, `Y = 1`, so dimming does not darken it); temperature is
   mireds passthrough clamped to `capabilities.control.ct` (default 153..500).
-- `setValue` echoes the value and the implied `on-off=1`; the SDK's `gladys.publishChangedStates` skips
+- `setValue` echoes the value and the implied `on-off=1`, except the on/off of a light whose cached
+  state says `reachable: false` (it then re-reads that light right away); the SDK's `gladys.publishChangedStates` skips
   unchanged values (it remembers what Gladys accepted and forgets a device the user creates, updates or
   deletes).
 
@@ -79,7 +80,8 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
   `DEFAULT_CONFIG` must match manifest defaults. `poll_frequency` is the interval of the manager's own
   refresh loop; it is NOT set on the published devices (Gladys never polled them).
 - `/data/bridges.json` (override dir with `HUE_DATA_DIR`): `{ bridges: [{ id, ip, username, scheme?,
-certFingerprint?, platformKey? }] }`. Atomic write via `.tmp` + rename; a failed write keeps the
+certFingerprint?, platformKey? }], forgotten?: [{ id?, ip, platformKey }] }` (`forgotten`: see
+  `store.remove()` below). Atomic write via `.tmp` + rename; a failed write keeps the
   pairing in memory and sets `store.persistError` (surfaced by `pairBridgeAction`).
 
 ## Resilience behaviours (see commits 5aa8022, 19d424e, 56804b3)
@@ -91,15 +93,17 @@ certFingerprint?, platformKey? }] }`. Atomic write via `.tmp` + rename; a failed
 - Connection status is recomputed from `unreachable` and sent only when it changes.
 - Bridges are addressed by their stored `ip` (registry entries and `unreachable` hold `bridgeIp`);
   nothing re-discovers a moved bridge automatically, re-pairing updates the ip (`upsert` keyed by id).
-- A light with `state.reachable: false` (cut at the wall) is published off, with the `unreachable`
-  transport badge (`publishLightTransports`, created devices only, only on change, cache in
-  `manager.transports`). `forgetUnreachableBridges()` (button `forget_bridges`) drops a stored
-  bridge only when its read fails with `isGone()` (no answer, Hue error 1, 404), never on 429/5xx,
-  and skips one re-paired during the probe. `store.remove()` keeps the `platformKey` of IP-keyed
+- A light with `state.reachable: false` on two reads in a row (cut at the wall; one read may be a
+  mesh blip, `debounceUnreachable`) is published off, with the `unreachable` transport badge
+  (`publishLightTransports`, created devices only, only on change, cache in `manager.transports`).
+  `forgetUnreachableBridges()` (button `forget_bridges`) drops a stored bridge when its read gets an
+  answer that `isGone()` (Hue error 1, any HTTP status but 429/5xx), or no answer while it was
+  already in `unreachable` before the click; it skips one re-paired during the probe. `store.remove()` keeps the `platformKey` of IP-keyed
   bridges in `forgotten`, given back by `upsert` on re-pairing. Results of calls to a bridge no longer
   stored are ignored (`markBridge`, end of `buildDiscoveredDevices`). Transports go through
   `queueTransports` (one call at a time, cache written before the request, rolled back on failure).
-  A bridge that does not answer, or is forgotten, gets the `unreachable` badge on its created lights.
+  A bridge that does not answer, or is forgotten, gets the `unreachable` badge on its created lights,
+  found in `gladys.devices` by external_id prefix (`createdLightsOf`), not in the registry.
 
 ## Tests
 

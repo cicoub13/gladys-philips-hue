@@ -160,8 +160,8 @@ export async function forgetBridgesAction(manager) {
   const busyNote =
     busy.length > 0
       ? {
-          en: ` Kept ${busy.map((bridge) => bridge.ip).join(', ')}: it answered, but with an error (busy or restarting).`,
-          fr: ` ${busy.map((bridge) => bridge.ip).join(', ')} conservé(s) : il a répondu, mais avec une erreur (occupé ou en redémarrage).`,
+          en: ` Kept ${busy.map((bridge) => bridge.ip).join(', ')}: busy, restarting or only just stopped answering. If it is really gone, try again in a minute.`,
+          fr: ` ${busy.map((bridge) => bridge.ip).join(', ')} conservé(s) : occupé, en redémarrage ou injoignable depuis peu. S'il a vraiment disparu, réessayez dans une minute.`,
         }
       : { en: '', fr: '' };
   if (forgotten.length === 0) {

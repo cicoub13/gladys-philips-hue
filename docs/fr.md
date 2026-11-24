@@ -74,7 +74,9 @@ Après avoir remplacé votre bridge ou migré vers un Hue Bridge Pro, appairez l
 nouveau (étapes ci-dessus), puis cliquez sur **Oublier les bridges
 injoignables** : l'intégration oublie tous les bridges appairés qui ne répondent
 plus, ou n'acceptent plus l'intégration, et cesse de les signaler injoignables.
-Un bridge qui fonctionne n'est jamais oublié, même s'il est occupé. Les lampes du nouveau bridge apparaissent comme de nouveaux appareils
+Un bridge qui fonctionne n'est jamais oublié, même s'il est occupé, pas plus
+qu'un bridge qui vient tout juste de cesser de répondre (il redémarre
+peut-être) : attendez une minute et recliquez. Les lampes du nouveau bridge apparaissent comme de nouveaux appareils
 dans l'onglet **Découverte** ; supprimez les anciens depuis la page Appareils.
 
 ## Comment le bridge est trouvé
