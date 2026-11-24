@@ -4,6 +4,15 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
 
 ## [Unreleased]
 
+### Fixed
+
+- Lights keep working after the bridge installs firmware 1.78 or later, which
+  blocks plain HTTP: a bridge paired over HTTP now switches to HTTPS on its own,
+  without pressing the link button or pairing again. Until now, every command
+  failed and the bridge was reported unreachable.
+- New pairings use HTTPS whenever the bridge supports it, and plain HTTP only
+  for the round v1 bridge.
+
 ## [2.0.3] - 2026-10-29
 
 ### Changed

@@ -1,6 +1,7 @@
 import { test, mock, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { HueBridgeClient, HUE_LINK_BUTTON_NOT_PRESSED, findHueError } from '../src/hue/bridge.js';
+import { stubHttps } from './fake-https.js';
 
 const USERNAME = 'super-secret-username';
 
@@ -165,4 +166,93 @@ test('requests target the bridge over plain HTTP with a JSON content type', asyn
   assert.equal(calls[0].options.method, 'PUT');
   assert.equal(calls[0].options.headers['Content-Type'], 'application/json');
   assert.equal(calls[0].options.body, JSON.stringify({ on: true }));
+});
+
+// What firmware 1.78+ answers on plain HTTP (aiohue issue 708).
+const HTTP_BLOCKED = { ok: false, status: 403, body: [{ error: { description: 'HTTP access is blocked' } }] };
+const BRIDGE_ID = '001788fffe123456';
+
+/**
+ * A client for a bridge paired over HTTP, recording the HTTPS upgrades it reports.
+ * @returns {{ client: HueBridgeClient, upgrades: object[] }} Client and recorded upgrades.
+ */
+function pairedOverHttp() {
+  const upgrades = [];
+  const client = new HueBridgeClient('192.168.1.10', USERNAME, {
+    scheme: 'http',
+    id: BRIDGE_ID,
+    onHttpsUpgrade: async (transport) => {
+      upgrades.push(transport);
+    },
+  });
+  return { client, upgrades };
+}
+
+test('a bridge that blocks HTTP is switched to HTTPS with the same username', async () => {
+  // No link-button press: the application key is not tied to the transport.
+  mockFetch([HTTP_BLOCKED]);
+  const { calls } = stubHttps(() => ({ body: { 3: { name: 'Salon' } }, cn: BRIDGE_ID }));
+  const { client, upgrades } = pairedOverHttp();
+
+  assert.deepEqual(await client.getLights(), { 3: { name: 'Salon' } });
+  assert.equal(calls[0].url, `https://192.168.1.10/api/${USERNAME}/lights`);
+  assert.equal(client.scheme, 'https');
+  assert.equal(upgrades.length, 1);
+  assert.equal(upgrades[0].scheme, 'https');
+  assert.ok(upgrades[0].certFingerprint, 'the certificate is pinned and persisted');
+});
+
+test('a bridge that closed port 80 is switched to HTTPS too', async () => {
+  const refused = new TypeError('fetch failed');
+  refused.cause = { code: 'ECONNREFUSED' };
+  mockFetch([{ throws: refused }]);
+  stubHttps(() => ({ body: [{ success: {} }], cn: BRIDGE_ID }));
+  const { client, upgrades } = pairedOverHttp();
+
+  await client.setLightState('3', { on: true });
+  assert.equal(client.scheme, 'https');
+  assert.equal(upgrades.length, 1);
+});
+
+test('once switched, the client talks HTTPS only', async () => {
+  const fetchMock = mockFetch([HTTP_BLOCKED]);
+  const { calls } = stubHttps(() => ({ body: {}, cn: BRIDGE_ID }));
+  const { client, upgrades } = pairedOverHttp();
+
+  await client.getLights();
+  await client.getLights();
+  assert.equal(fetchMock.calls.length, 1);
+  assert.equal(calls.length, 2);
+  assert.equal(upgrades.length, 1);
+});
+
+test('the switch refuses a certificate that is not the bridge one', async () => {
+  // Something else answering on 443 must not get the username.
+  mockFetch([HTTP_BLOCKED]);
+  stubHttps(() => ({ body: {}, cn: 'someone-else' }));
+  const { client, upgrades } = pairedOverHttp();
+
+  const error = await client.getLights().catch((caught) => caught);
+  assert.match(error.message, /HTTP 403.*HTTPS failed too: Refused the TLS certificate/);
+  assert.equal(error.httpStatus, 403, 'the bridge answered: it is not reported unreachable');
+  assert.ok(!error.message.includes(USERNAME));
+  assert.equal(client.scheme, 'http');
+  assert.deepEqual(upgrades, []);
+});
+
+test('an HTTP error other than "blocked" does not trigger the switch', async () => {
+  mockFetch([{ ok: false, status: 404 }]);
+  const { calls } = stubHttps();
+  const { client, upgrades } = pairedOverHttp();
+
+  await assert.rejects(() => client.getLights(), /HTTP 404/);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(upgrades, []);
+});
+
+test('a client without an upgrade hook never switches (identification)', async () => {
+  mockFetch([HTTP_BLOCKED]);
+  const { calls } = stubHttps();
+  await assert.rejects(() => new HueBridgeClient('192.168.1.10').getConfig({ retries: 0 }), /HTTP 403/);
+  assert.equal(calls.length, 0);
 });

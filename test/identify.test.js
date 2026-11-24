@@ -1,6 +1,7 @@
-import { test, mock, afterEach } from 'node:test';
+import { test, mock, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { identifyBridge, identifyBridges, parseBridgeConfig } from '../src/hue/identify.js';
+import { stubHttps } from './fake-https.js';
 
 // What a real bridge answers on GET /api/config, unauthenticated.
 const BRIDGE_CONFIG = {
@@ -29,6 +30,8 @@ function jsonResponse(body) {
   return { ok: true, status: 200, json: async () => body };
 }
 
+// Port 443 closed everywhere unless a test says otherwise.
+beforeEach(() => stubHttps());
 afterEach(() => mock.restoreAll());
 
 test('parseBridgeConfig accepts a real bridge description', () => {
@@ -59,7 +62,22 @@ test('parseBridgeConfig rejects anything without a bridge id', () => {
   assert.equal(parseBridgeConfig('1.2.3.4', [BRIDGE_CONFIG]), undefined, 'an array is not a config');
 });
 
-test('identifyBridge proves a bridge over plain HTTP', async () => {
+test('identifyBridge proves a bridge over HTTPS first, without touching HTTP', async () => {
+  // Firmware 1.78 blocks HTTP: a bridge identified over it would be paired on a
+  // scheme that is about to stop working.
+  mock.restoreAll();
+  const { calls } = stubHttps(() => ({ body: BRIDGE_CONFIG, cn: '001788fffe123456' }));
+  const fetchMock = stubFetch(() => jsonResponse(BRIDGE_CONFIG));
+
+  const identity = await identifyBridge('192.168.1.42');
+  assert.equal(identity.id, '001788fffe123456');
+  assert.equal(identity.scheme, 'https');
+  assert.ok(identity.certFingerprint, 'the certificate is pinned for pairing');
+  assert.equal(calls[0].url, 'https://192.168.1.42/api/config');
+  assert.equal(fetchMock.mock.callCount(), 0);
+});
+
+test('identifyBridge falls back to plain HTTP when HTTPS is refused (round v1 bridge)', async () => {
   stubFetch((url) => {
     assert.match(url, /^http:\/\/192\.168\.1\.42\/api\/config$/);
     return jsonResponse(BRIDGE_CONFIG);
@@ -89,12 +107,14 @@ test('identifyBridge rejects an address where nothing listens', async () => {
   assert.equal(await identifyBridge('192.168.0.243'), undefined);
 });
 
-test('identifyBridge does not try HTTPS when HTTP already answered', async () => {
+test('identifyBridge does not try HTTP when HTTPS already answered', async () => {
   // A device that answers "I am not a bridge" is settled; probing it again over
-  // TLS only slows the Discover button down.
+  // HTTP only slows the Discover button down.
+  mock.restoreAll();
+  stubHttps(() => ({ body: { name: 'My NAS' } }));
   const fetchMock = stubFetch(() => jsonResponse({ name: 'My NAS' }));
-  await identifyBridge('192.168.0.235');
-  assert.equal(fetchMock.mock.callCount(), 1);
+  assert.equal(await identifyBridge('192.168.0.235'), undefined);
+  assert.equal(fetchMock.mock.callCount(), 0);
 });
 
 test('identifyBridges sorts the proven bridges from the rest', async () => {

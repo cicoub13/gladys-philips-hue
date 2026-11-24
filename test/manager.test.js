@@ -9,6 +9,7 @@ import { BridgeStore } from '../src/hue/store.js';
 import { FEATURE } from '../src/hue/mapping.js';
 import { resetDiscoveryCache } from '../src/hue/discovery.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
+import { stubHttps } from './fake-https.js';
 
 // The SDK's fake Gladys, recording everything published. The `test` selector
 // gives the `ext:test:…` external ids the tests below expect.
@@ -462,6 +463,7 @@ test('pairBridges never tries to pair a device that is not a Hue bridge', async 
   ];
 
   const calls = [];
+  stubHttps();
   mock.method(global, 'fetch', async (url, options = {}) => {
     calls.push(`${options.method || 'GET'} ${url}`);
     if (String(url).includes('192.168.0.243')) {
@@ -479,6 +481,31 @@ test('pairBridges never tries to pair a device that is not a Hue bridge', async 
     calls.every((call) => !call.startsWith('POST')),
     `no pairing attempt should be made, got: ${calls.join(' | ')}`,
   );
+  mock.restoreAll();
+});
+
+test('a bridge paired over HTTP is moved to HTTPS for good once its firmware blocks HTTP', async () => {
+  // Bridges paired before firmware 1.78 are stored as `http`: without the
+  // switch, every command and refresh fails until the user pairs again.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hue-mgr-'));
+  const file = path.join(dir, 'bridges.json');
+  const store = new BridgeStore(file);
+  await store.load();
+  await store.upsert({ id: '001788fffe123456', ip: '192.168.1.10', username: 'user-1', scheme: 'http' });
+  const manager = new HueManager(makeGladys(), { ...DEFAULT_CONFIG }, store);
+  mock.method(global, 'fetch', async () => ({ ok: false, status: 403, json: async () => [] }));
+  stubHttps(() => ({ body: { 3: { name: 'Salon', uniqueid: '00:17:88:01:aa' } }, cn: '001788fffe123456' }));
+
+  const { reachable } = await manager.buildDiscoveredDevices();
+  assert.equal(reachable, 1);
+
+  const reopened = new BridgeStore(file);
+  await reopened.load();
+  const [bridge] = reopened.list();
+  assert.equal(bridge.scheme, 'https');
+  assert.ok(bridge.certFingerprint);
+  assert.equal(bridge.username, 'user-1', 'no new pairing');
+  assert.equal(bridge.id, '001788fffe123456', 'same bridge: the external_ids are kept');
   mock.restoreAll();
 });
 

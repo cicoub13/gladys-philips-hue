@@ -15,8 +15,8 @@
 //      is refused: something answers in place of the bridge we paired with.
 //
 // `rejectUnauthorized: false` is therefore never "no verification": it hands the
-// verification to us, and we do it against the pin. HTTP stays the default —
-// this path only matters for bridges/firmwares that refuse plain HTTP.
+// verification to us, and we do it against the pin. HTTPS is the default for
+// every bridge that serves it; plain HTTP is only left for the round v1 bridge.
 // -----------------------------------------------------------------------------
 
 import http from 'node:http';

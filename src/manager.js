@@ -140,6 +140,9 @@ export class HueManager {
       scheme: bridge.scheme,
       id: bridge.id,
       certFingerprint: bridge.certFingerprint,
+      // A bridge paired over HTTP whose firmware now blocks it: remember that it
+      // answers on HTTPS, and the certificate pinned on the way.
+      onHttpsUpgrade: (transport) => this.store.upsert({ ...bridge, ...transport }),
     });
   }
 

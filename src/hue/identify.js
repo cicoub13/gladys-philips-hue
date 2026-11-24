@@ -66,14 +66,14 @@ export function parseBridgeConfig(ip, body, scheme = 'http', certFingerprint) {
 /**
  * Prove that an address hosts a Philips Hue bridge.
  *
- * Tries plain HTTP first (the v1 API every bridge still serves), then HTTPS:
- * Signify is progressively blocking HTTP, and recent firmwares answer only on
- * TLS. Never throws — an unidentified candidate is simply not a bridge.
+ * Tries HTTPS first, then plain HTTP: Signify blocks HTTP since firmware 1.78
+ * and the Bridge Pro never served it, while the round v1 bridge (BSB001) never
+ * got HTTPS. Never throws — an unidentified candidate is simply not a bridge.
  * @param {string} ip - Candidate address.
  * @returns {Promise<object | undefined>} Identity, or `undefined`.
  */
 export async function identifyBridge(ip) {
-  for (const scheme of ['http', 'https']) {
+  for (const scheme of ['https', 'http']) {
     const client = new HueBridgeClient(ip, undefined, { scheme, timeoutMs: IDENTIFY_TIMEOUT_MS });
     try {
       // No retry: a candidate that does not answer once is not worth a second
