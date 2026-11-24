@@ -117,3 +117,20 @@ test('a temporary file left by an interrupted write is cleaned up and never reus
   await store.upsert({ id: 'b1', ip: '10.0.0.1', username: 'u1' });
   assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
 });
+
+test('BridgeStore survives concurrent writes', async () => {
+  // Two bridges switched to HTTPS in the same refresh: interleaved writes
+  // shared the temporary file, and the second rename failed with ENOENT.
+  const file = await tempFile();
+  const store = new BridgeStore(file);
+  await store.load();
+  await Promise.all([
+    store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-1' }),
+    store.upsert({ id: 'b2', ip: '192.168.1.20', username: 'user-2' }),
+  ]);
+  assert.equal(store.persistError, undefined);
+
+  const reopened = new BridgeStore(file);
+  await reopened.load();
+  assert.equal(reopened.list().length, 2);
+});

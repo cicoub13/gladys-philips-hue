@@ -27,8 +27,11 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
 
 ## Hue API (local v1, `/api/...`)
 
-- v1 on purpose (every bridge generation). Plain HTTP by default; HTTPS only when identification
-  found the bridge refuses HTTP. `scheme` and `certFingerprint` are persisted per bridge.
+- v1 on purpose (every bridge generation). New pairings use HTTPS when the bridge serves it, HTTP
+  otherwise (BSB001). A bridge stored as `http` that answers 403 / refuses port 80 (firmware 1.78+) is
+  switched once per client (`upgradeToHttps`): unauthenticated `/api/config` probe, cert CN must equal
+  the announced (and stored) id, then `onHttpsUpgrade` persists it. `scheme` and `certFingerprint`
+  are persisted per bridge; `BridgeStore.persist()` serializes writes.
 - **Errors come as HTTP 200** with `[{"error":{type,description}}]` → `findHueError()` turns them into
   thrown errors with `.hueErrorType`. HTTP errors carry `.httpStatus`. Neither set = network failure
   (`isUnreachable()` in manager relies on this distinction for connection status).
@@ -37,10 +40,13 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
 - Retries: 1 retry after 400 ms for network errors and 429/5xx; Hue business errors never retried.
   `createUser` has `retries: 0` (not idempotent, bridge holds ~63 users). Timeout 8 s (3.5 s when identifying).
 - Identification: unauthenticated `GET /api/config`; needs `bridgeid` + (`modelid` or `apiversion`).
-  Tries HTTP then HTTPS; stops if something answered but isn't a bridge. Whole action must fit the
+  Tries HTTPS then HTTP; stops if something answered but isn't a bridge. Over HTTPS the cert CN
+  must equal the announced `bridgeid`, else it falls back to HTTP. Whole action must fit the
   manifest's 20 s `timeout_seconds`.
 - HTTPS trust = TOFU: first contact checks cert CN == bridge id, then SHA-256 fingerprint is pinned.
-  `requestJson` exposes it as a **non-enumerable** `fingerprint` on the body. Has an overall deadline
+  The check runs in `createConnection` right after the handshake, before the request (and the
+  username in its path) is written. `requestJson` exposes **non-enumerable** `fingerprint` and
+  `commonName` on the body; a refused certificate sets `error.tlsRefused`. Has an overall deadline
   and a `close` handler (a mid-body disconnect used to hang forever).
 - Discovery order: mediated SSDP (`hue-bridgeid` header required) → mediated mDNS `_hue._tcp`
   (TXT `bridgeid` or name matching /hue/) → N-UPnP cloud `https://discovery.meethue.com/`. Results

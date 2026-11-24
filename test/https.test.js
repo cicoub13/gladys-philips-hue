@@ -51,10 +51,16 @@ test('the pin wins over the common name', () => {
   );
 });
 
-test('first contact without a known bridge id still yields a pin', () => {
-  const verdict = checkCertificate(certificate('whatever'), {});
+test('a certificate without a common name is refused when a bridge id is expected', () => {
+  const verdict = checkCertificate(certificate(''), { bridgeId: BRIDGE_ID });
+  assert.equal(verdict.trusted, false);
+});
+
+test('first contact without a known bridge id still yields a pin, and the CN for the caller to check', () => {
+  const verdict = checkCertificate(certificate('Whatever'), {});
   assert.equal(verdict.trusted, true);
   assert.ok(verdict.fingerprint.length > 0);
+  assert.equal(verdict.commonName, 'whatever');
 });
 
 /**

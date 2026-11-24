@@ -35,6 +35,8 @@ export class BridgeStore {
     this.loaded = false;
     /** @type {Error | undefined} Last failure to write the store, if any. */
     this.persistError = undefined;
+    // Tail of the write queue (see `persist`).
+    this.writing = Promise.resolve();
   }
 
   /**
@@ -73,9 +75,22 @@ export class BridgeStore {
    * filesystem, so a power cut can never leave a truncated `bridges.json` —
    * which `load()` would read as "no bridge paired", silently losing the
    * pairing and sending the user back to the bridge's link button.
+   *
+   * Writes run one at a time: two interleaved writes share the temporary file,
+   * and the second rename fails once the first moved it away.
    * @returns {Promise<void>} Resolves once written.
    */
-  async persist() {
+  persist() {
+    const write = this.writing.then(() => this.write());
+    this.writing = write.catch(() => {});
+    return write;
+  }
+
+  /**
+   * One write of the store (see `persist`).
+   * @returns {Promise<void>} Resolves once written.
+   */
+  async write() {
     await fs.mkdir(path.dirname(this.file), { recursive: true });
     const temporaryFile = `${this.file}.tmp`;
     // `mode` only applies when the file is created: a leftover temporary file

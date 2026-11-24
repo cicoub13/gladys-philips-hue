@@ -494,7 +494,12 @@ test('a bridge paired over HTTP is moved to HTTPS for good once its firmware blo
   await store.upsert({ id: '001788fffe123456', ip: '192.168.1.10', username: 'user-1', scheme: 'http' });
   const manager = new HueManager(makeGladys(), { ...DEFAULT_CONFIG }, store);
   mock.method(global, 'fetch', async () => ({ ok: false, status: 403, json: async () => [] }));
-  stubHttps(() => ({ body: { 3: { name: 'Salon', uniqueid: '00:17:88:01:aa' } }, cn: '001788fffe123456' }));
+  stubHttps((url) => ({
+    body: url.endsWith('/api/config')
+      ? { bridgeid: '001788FFFE123456', modelid: 'BSB002' }
+      : { 3: { name: 'Salon', uniqueid: '00:17:88:01:aa' } },
+    cn: '001788fffe123456',
+  }));
 
   const { reachable } = await manager.buildDiscoveredDevices();
   assert.equal(reachable, 1);

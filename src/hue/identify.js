@@ -80,6 +80,12 @@ export async function identifyBridge(ip) {
       // round, and there may be many of them.
       const body = await client.getConfig({ retries: 0 });
       const identity = parseBridgeConfig(ip, body, scheme, client.certFingerprint);
+      if (identity && scheme === 'https' && client.certCommonName !== identity.id) {
+        // Its certificate would be pinned for pairing: it must name the bridge
+        // id announced here (see the trust model in ./https.js).
+        logger.debug(`Ignoring ${ip} over https: its certificate names "${client.certCommonName}", not ${identity.id}`);
+        continue;
+      }
       if (identity) {
         logger.debug(`${ip} is a Hue bridge: ${identity.name} (${identity.model || 'unknown model'}) over ${scheme}`);
         return identity;

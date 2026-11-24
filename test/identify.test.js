@@ -77,6 +77,18 @@ test('identifyBridge proves a bridge over HTTPS first, without touching HTTP', a
   assert.equal(fetchMock.mock.callCount(), 0);
 });
 
+test('identifyBridge never pins a certificate that does not name the bridge it announces', async () => {
+  // Pairing pins the certificate of this probe: something answering on 443
+  // with a bridge-like body must not get pinned as that bridge.
+  mock.restoreAll();
+  stubHttps(() => ({ body: BRIDGE_CONFIG, cn: 'impostor' }));
+  stubFetch(() => jsonResponse(BRIDGE_CONFIG));
+
+  const identity = await identifyBridge('192.168.1.42');
+  assert.equal(identity.scheme, 'http', 'falls back to plain HTTP');
+  assert.equal(identity.certFingerprint, undefined);
+});
+
 test('identifyBridge falls back to plain HTTP when HTTPS is refused (round v1 bridge)', async () => {
   stubFetch((url) => {
     assert.match(url, /^http:\/\/192\.168\.1\.42\/api\/config$/);
