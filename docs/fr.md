@@ -76,7 +76,7 @@ injoignables** : l'intégration oublie tous les bridges appairés qui ne répond
 plus, ou n'acceptent plus l'intégration, et cesse de les signaler injoignables.
 Un bridge qui fonctionne n'est jamais oublié, même s'il est occupé, pas plus
 qu'un bridge qui vient tout juste de cesser de répondre (il redémarre
-peut-être) : attendez une minute et recliquez. Les lampes du nouveau bridge apparaissent comme de nouveaux appareils
+peut-être) : recliquez quand il ne répond plus depuis 5 minutes. Les lampes du nouveau bridge apparaissent comme de nouveaux appareils
 dans l'onglet **Découverte** ; supprimez les anciens depuis la page Appareils.
 
 ## Comment le bridge est trouvé

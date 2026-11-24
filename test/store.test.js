@@ -172,11 +172,30 @@ test('a bridge paired by 1.0.x/1.1.0, forgotten then paired again, keeps its ext
   assert.deepEqual(reopened.forgotten, [], 'each key is given back once');
 });
 
-test('forgetting a bridge with an id-based key leaves nothing behind', async () => {
+test('forgetting a bridge with an id-based key keeps no key, only its id', async () => {
   const file = await tempFile();
   const store = new BridgeStore(file);
   await store.load();
   await store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-1' });
   await store.remove([...store.list()]);
-  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), { bridges: [] });
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), {
+    bridges: [],
+    forgotten: [{ id: 'b1', ip: '192.168.1.10' }],
+  });
+  await store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-2' });
+  assert.deepEqual(store.list(), [{ id: 'b1', ip: '192.168.1.10', username: 'user-2' }]);
+});
+
+test("a bridge with an id paired at a forgotten id-less bridge's address keeps its own key", async () => {
+  // Otherwise its lights would move from `B-…` to `10.0.0.1-…`, orphaning its devices.
+  const store = new BridgeStore(await tempFile());
+  await store.load();
+  store.bridges = [
+    { ip: '10.0.0.1', username: 'user-a' },
+    { id: 'B', ip: '10.0.0.2', username: 'user-b' },
+  ];
+  await store.remove([...store.list()]);
+  await store.upsert({ id: 'B', ip: '10.0.0.1', username: 'user-b2' });
+  assert.deepEqual(store.list(), [{ id: 'B', ip: '10.0.0.1', username: 'user-b2' }]);
+  assert.deepEqual(store.forgotten, [{ ip: '10.0.0.1', platformKey: '10.0.0.1' }]);
 });

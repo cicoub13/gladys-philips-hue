@@ -39,6 +39,10 @@ const RESYNC_MAX_MS = 5 * 60 * 1000;
 // Gladys takes at most this many transports per publishTransports call.
 const MAX_TRANSPORTS_PER_REQUEST = 100;
 
+// A bridge that does not answer may be rebooting (a firmware update takes 1 to
+// 2 minutes): Forget only drops it once it has been silent for this long.
+const SILENT_FORGET_MS = 5 * 60 * 1000;
+
 // Hue error type of a username the bridge no longer knows (bridge reset).
 const HUE_UNAUTHORIZED_USER = 1;
 
@@ -121,10 +125,11 @@ export class HueManager {
     /** @type {Set<string>} IPs of the paired bridges that did not answer last time. */
     this.unreachable = new Set();
     /**
-     * @type {Set<string>} Among them, those whose last read got no answer at all
-     * (a 429/5xx answer marks a bridge unreachable during a scan, not silent).
+     * @type {Map<string, number>} Since when each bridge (by `platformKeyOf`, not by
+     * address: two stored bridges may share one) has been getting no answer at all.
+     * A 429/5xx answer marks a bridge unreachable during a scan, not silent.
      */
-    this.silent = new Set();
+    this.silentSince = new Map();
     /** Last status sent to Gladys, to only send changes. */
     this.statusKey = undefined;
     this.resyncTimer = undefined;
@@ -195,17 +200,45 @@ export class HueManager {
    * @returns {string[]} Device external_ids.
    */
   createdLightsOf(bridge) {
-    return this.gladys.devices.map((device) => device.external_id).filter((id) => this.isLightOf(id, bridge));
+    const candidates = [...this.store.list(), bridge];
+    return this.gladys.devices
+      .map((device) => device.external_id)
+      .filter((id) => this.ownerOf(id, candidates) === bridge);
   }
 
   /**
-   * Whether a device external_id is one of a bridge's lights.
+   * The bridge a light belongs to, from its external_id. The longest matching
+   * prefix wins: legacy bridges are keyed by the address typed in, so `hue` and
+   * `hue-2` can both be stored.
    * @param {string} externalId - Device external_id.
-   * @param {{ id?: string, ip: string, platformKey?: string }} bridge - Stored bridge.
-   * @returns {boolean} True when it is.
+   * @param {Array<object>} [bridges] - Candidate bridges (the stored ones by default).
+   * @returns {object | undefined} The bridge, if any.
    */
-  isLightOf(externalId, bridge) {
-    return externalId.startsWith(this.gladys.externalIds(DEVICE_TYPE, `${platformKeyOf(bridge)}-`).device);
+  ownerOf(externalId, bridges = this.store.list()) {
+    let owner;
+    let longest = -1;
+    for (const bridge of bridges) {
+      const prefix = this.gladys.externalIds(DEVICE_TYPE, `${platformKeyOf(bridge)}-`).device;
+      if (externalId.startsWith(prefix) && prefix.length > longest) {
+        owner = bridge;
+        longest = prefix.length;
+      }
+    }
+    return owner;
+  }
+
+  /**
+   * Record whether a bridge's last read got an answer (see `silentSince`).
+   * @param {object} bridge - Stored bridge.
+   * @param {boolean} answered - Whether it answered, even with an error.
+   */
+  recordSilence(bridge, answered) {
+    const key = platformKeyOf(bridge);
+    if (answered) {
+      this.silentSince.delete(key);
+    } else if (!this.silentSince.has(key)) {
+      this.silentSince.set(key, Date.now());
+    }
   }
 
   /**
@@ -245,21 +278,21 @@ export class HueManager {
       try {
         lights = await (reads.get(bridge) || client.getLights());
         this.unreachable.delete(bridge.ip);
-        this.silent.delete(bridge.ip);
+        this.recordSilence(bridge, true);
       } catch (error) {
         unreachable += 1;
         this.unreachable.add(bridge.ip);
         logger.warn(`Could not read lights from bridge ${bridge.ip}: ${error.message}`);
+        this.recordSilence(bridge, !isUnreachable(error));
         if (isUnreachable(error)) {
-          this.silent.add(bridge.ip);
           await this.markLightsUnreachable(bridge);
-        } else {
-          this.silent.delete(bridge.ip);
         }
-        // Carry over what we already knew about this bridge's lights.
+        // Carry over what we already knew about this bridge's lights, and keep
+        // them in the Discovery tab.
         for (const [deviceId, entry] of this.registry) {
-          if (entry.bridgeIp === bridge.ip) {
+          if (this.ownerOf(deviceId) === bridge) {
             nextRegistry.set(deviceId, entry);
+            devices.push(lightToDevicePayload(this.gladys.externalIds(DEVICE_TYPE, entry.platformId), entry.light));
           }
         }
         continue;
@@ -287,13 +320,18 @@ export class HueManager {
     // Against the store as it is NOW: a bridge forgotten, or re-paired at another
     // address, while this scan was reading must not come back.
     const stored = new Set(this.store.list().map((bridge) => bridge.ip));
-    for (const ip of [...this.unreachable, ...this.silent]) {
+    for (const ip of this.unreachable) {
       if (!stored.has(ip)) {
         this.unreachable.delete(ip);
-        this.silent.delete(ip);
       }
     }
-    this.registry = new Map([...nextRegistry].filter(([, entry]) => stored.has(entry.bridgeIp)));
+    const storedKeys = new Set(this.store.list().map(platformKeyOf));
+    for (const key of this.silentSince.keys()) {
+      if (!storedKeys.has(key)) {
+        this.silentSince.delete(key);
+      }
+    }
+    this.registry = new Map([...nextRegistry].filter(([deviceId]) => this.ownerOf(deviceId)));
     const kept = devices.filter((device) => this.registry.has(device.external_id));
     const reachable = bridges.length - unreachable;
     logger.info(`Discovered ${kept.length} light(s) across ${reachable}/${bridges.length} reachable bridge(s)`);
@@ -337,7 +375,7 @@ export class HueManager {
     if (this.store.list().length === 0) {
       // Nothing left to be unreachable, nor to retry.
       this.unreachable.clear();
-      this.silent.clear();
+      this.silentSince.clear();
       this.scheduleResync();
       if (force) {
         await this.gladys.publishDiscoveredDevices([]);
@@ -401,22 +439,21 @@ export class HueManager {
    * Record whether a bridge answered a refresh or command, and update the status
    * and the resync loop accordingly. Never throws: the caller's own outcome is
    * what Gladys must see.
-   * @param {string} ip - Bridge address.
+   * @param {object} bridge - Stored bridge.
    * @param {boolean} reachable - Whether it answered.
    * @returns {Promise<void>} Resolves once reported.
    */
-  async markBridge(ip, reachable) {
-    if (!this.store.list().some((bridge) => bridge.ip === ip)) {
+  async markBridge(bridge, reachable) {
+    if (!this.store.list().includes(bridge)) {
       // Forgotten while this call was in flight: nothing to record.
       return;
     }
     if (reachable) {
-      this.unreachable.delete(ip);
-      this.silent.delete(ip);
+      this.unreachable.delete(bridge.ip);
     } else {
-      this.unreachable.add(ip);
-      this.silent.add(ip);
+      this.unreachable.add(bridge.ip);
     }
+    this.recordSilence(bridge, reachable);
     this.scheduleResync();
     try {
       await this.reportStatus();
@@ -427,17 +464,17 @@ export class HueManager {
 
   /**
    * Run one call to a bridge, recording whether it answered.
-   * @param {string} ip - Bridge address.
+   * @param {object} bridge - Stored bridge.
    * @param {() => Promise<any>} operation - The call.
    * @returns {Promise<any>} The call's result.
    */
-  async callBridge(ip, operation) {
+  async callBridge(bridge, operation) {
     try {
       const result = await operation();
-      await this.markBridge(ip, true);
+      await this.markBridge(bridge, true);
       return result;
     } catch (error) {
-      await this.markBridge(ip, !isUnreachable(error));
+      await this.markBridge(bridge, !isUnreachable(error));
       throw error;
     }
   }
@@ -549,7 +586,7 @@ export class HueManager {
       this.store.list().map((bridge) => {
         const hueIds = [];
         for (const [deviceId, entry] of this.registry) {
-          if (entry.bridgeIp === bridge.ip && created.has(deviceId)) {
+          if (created.has(deviceId) && this.ownerOf(deviceId) === bridge) {
             hueIds.push(entry.hueId);
           }
         }
@@ -567,7 +604,7 @@ export class HueManager {
    * @returns {boolean} False when its bridge was forgotten (or never paired).
    */
   hasStoredBridge(device) {
-    return this.store.list().some((bridge) => this.isLightOf(device.external_id, bridge));
+    return Boolean(this.ownerOf(device.external_id));
   }
 
   /**
@@ -616,7 +653,7 @@ export class HueManager {
       }
       throw new Error(`Unknown light ${device.external_id}: run a scan from the Discovery tab`);
     }
-    const bridge = this.store.list().find((b) => b.ip === entry.bridgeIp);
+    const bridge = this.ownerOf(device.external_id);
     if (!bridge) {
       throw new Error(`Bridge ${entry.bridgeIp} is no longer paired, pair it again from the Configuration screen`);
     }
@@ -642,7 +679,7 @@ export class HueManager {
     const hueState = featureValueToHueState(kind, value, entry.light);
     logger.info(`setValue ${feature.external_id} = ${value} -> ${JSON.stringify(hueState)}`);
     // Throws (and fails the command in Gladys) when the bridge refuses it.
-    await this.callBridge(entry.bridgeIp, () => client.setLightState(entry.hueId, hueState));
+    await this.callBridge(bridge, () => client.setLightState(entry.hueId, hueState));
     this.commandSeq += 1;
     entry.commandSeq = this.commandSeq;
 
@@ -689,7 +726,7 @@ export class HueManager {
     const results = await Promise.allSettled(
       bridges.map((bridge) => {
         const client = this.clientFor(bridge);
-        return this.callBridge(bridge.ip, () => Promise.all([client.getGroups(), client.getScenes()]));
+        return this.callBridge(bridge, () => Promise.all([client.getGroups(), client.getScenes()]));
       }),
     );
     const candidates = [];
@@ -720,7 +757,7 @@ export class HueManager {
     const bridge = bridges.find((b) => b.ip === match.bridgeIp);
     const client = this.clientFor(bridge);
     logger.info(`Recalling Hue scene "${match.sceneName}" (${match.roomName || 'all lights'}) on ${match.bridgeIp}`);
-    await this.callBridge(match.bridgeIp, () => client.recallScene(match.groupId, match.sceneId));
+    await this.callBridge(bridge, () => client.recallScene(match.groupId, match.sceneId));
     // Like a command: a refresh already reading these lights must not undo it.
     this.commandSeq += 1;
     for (const entry of this.registry.values()) {
@@ -748,16 +785,17 @@ export class HueManager {
    * @returns {Promise<void>} Resolves once the states are published.
    */
   async refreshLights(bridge, client, hueIds) {
-    const entries = [...this.registry.values()].filter(
-      (entry) => entry.bridgeIp === bridge.ip && hueIds.includes(entry.hueId),
-    );
+    // By owner, not by address: two stored bridges may share one.
+    const entries = [...this.registry]
+      .filter(([deviceId, entry]) => hueIds.includes(entry.hueId) && this.ownerOf(deviceId) === bridge)
+      .map(([, entry]) => entry);
     if (entries.length === 0) {
       return;
     }
     const readSeq = this.commandSeq;
     let lights;
     try {
-      lights = await this.callBridge(bridge.ip, () => client.getLights());
+      lights = await this.callBridge(bridge, () => client.getLights());
     } catch (error) {
       logger.warn(`Could not refresh the lights of bridge ${bridge.ip}: ${error.message}`);
       if (isUnreachable(error)) {
@@ -851,7 +889,8 @@ export class HueManager {
    */
   queueTransports(wanted) {
     const run = this.transportQueue.then(() => this.sendTransports(wanted));
-    this.transportQueue = run;
+    // A rejection must not block every later badge.
+    this.transportQueue = run.catch(() => {});
     return run;
   }
 
@@ -912,12 +951,12 @@ export class HueManager {
    * Bridge Pro, reset, or unplugged. Without this an old bridge stays stored
    * forever, the status keeps saying "1 Hue bridge unreachable" and the
    * background resync never stops. A bridge is forgotten when its read gets an
-   * answer proving it is gone (see `isGone`), or no answer at all while its
-   * last read before the click got none either (a single missed read may be a
-   * reboot or a network blip; a 429/5xx answer is not "no answer"). A probe
-   * that gets no answer is recorded, so the next click can forget the bridge. Any other failure (429/5xx, or a bridge that has only just stopped
-   * answering) keeps it, in `busy`. Their lights stay in Gladys, for the user to
-   * delete, with the `unreachable` badge.
+   * answer proving it is gone (see `isGone`), or no answer at all after getting
+   * none for `SILENT_FORGET_MS` already (a firmware update reboots it for 1 to 2
+   * minutes; a 429/5xx answer is not "no answer"). The probe is recorded like
+   * any read, so that a later click can forget a bridge nothing else reads. Any
+   * other failure keeps the bridge, in `busy`. Their lights stay in Gladys, for
+   * the user to delete, with the `unreachable` badge.
    *
    * Never rejects once bridges are removed: what follows the removal is
    * best-effort, and the caller must report what was forgotten.
@@ -925,7 +964,7 @@ export class HueManager {
    * forgotten, kept (`busy` among them), and the error of saving the removal, if any.
    */
   async forgetUnreachableBridges() {
-    const wasDown = new Set(this.silent);
+    const silentSince = new Map(this.silentSince);
     // What each bridge was when probed: a pairing during the probe updates the
     // stored entry in place (new address, new username), and must survive.
     const probed = this.store.list().map((bridge) => ({ bridge, ip: bridge.ip, username: bridge.username }));
@@ -935,51 +974,51 @@ export class HueManager {
     const forgotten = [];
     const kept = [];
     const busy = [];
-    results.forEach((result, index) => {
-      const { bridge, ip, username } = probed[index];
+    const unchanged = probed.map(({ bridge, ip, username }) => bridge.ip === ip && bridge.username === username);
+    for (const [index, result] of results.entries()) {
+      const { bridge, ip } = probed[index];
       if (!this.store.list().includes(bridge)) {
-        return; // removed meanwhile
+        continue; // removed meanwhile
       }
-      const unchanged = bridge.ip === ip && bridge.username === username;
+      if (!unchanged[index]) {
+        kept.push(bridge); // re-paired during the probe: what it read is stale
+        continue;
+      }
       const { reason } = result;
-      const gone = result.status === 'rejected' && (isGone(reason) || (isUnreachable(reason) && wasDown.has(ip)));
-      if (gone && unchanged) {
+      const since = silentSince.get(platformKeyOf(bridge));
+      const longSilent = since !== undefined && Date.now() - since >= SILENT_FORGET_MS;
+      if (result.status === 'rejected' && (isGone(reason) || (isUnreachable(reason) && longSilent))) {
         logger.info(`Forgetting bridge ${ip}: ${reason.message}`);
         forgotten.push(bridge);
-        return;
+        continue;
       }
-      if (result.status === 'rejected' && unchanged) {
+      if (result.status === 'rejected') {
         logger.info(`Keeping bridge ${ip}, which may only be busy or restarting: ${reason.message}`);
         busy.push(bridge);
       }
       kept.push(bridge);
-    });
-    // Nothing else may read a bridge with no created light: record that it did
-    // not answer, so that it shows unreachable and the next click forgets it.
-    for (const bridge of busy) {
-      if (isUnreachable(results[probed.findIndex((entry) => entry.bridge === bridge)].reason)) {
-        await this.markBridge(bridge.ip, false);
-      }
+      // Like any read: the status, and when it started not answering.
+      await this.markBridge(bridge, result.status === 'fulfilled' || !isUnreachable(reason));
     }
     if (forgotten.length === 0) {
       return { forgotten, kept, busy };
     }
 
     const saveError = await this.store.remove(forgotten);
-    // By platformId, not by address: a bridge still stored may share it.
-    const prefixes = forgotten.map((bridge) => `${platformKeyOf(bridge)}-`);
-    for (const [deviceId, entry] of this.registry) {
-      if (prefixes.some((prefix) => entry.platformId.startsWith(prefix))) {
+    // By owner, not by address: a bridge still stored may share it.
+    const candidates = [...this.store.list(), ...forgotten];
+    for (const deviceId of [...this.registry.keys()]) {
+      if (forgotten.includes(this.ownerOf(deviceId, candidates))) {
         this.registry.delete(deviceId);
       }
     }
     const storedIps = new Set(this.store.list().map((bridge) => bridge.ip));
-    forgotten
-      .filter(({ ip }) => !storedIps.has(ip))
-      .forEach(({ ip }) => {
-        this.unreachable.delete(ip);
-        this.silent.delete(ip);
-      });
+    for (const bridge of forgotten) {
+      this.silentSince.delete(platformKeyOf(bridge));
+      if (!storedIps.has(bridge.ip)) {
+        this.unreachable.delete(bridge.ip);
+      }
+    }
     // Stops the background resync when no unreachable bridge is left.
     this.scheduleResync();
     try {
@@ -988,9 +1027,11 @@ export class HueManager {
         await this.markLightsUnreachable(bridge);
       }
       // Even if no bridge answers: the previous list holds the forgotten lights.
-      // From the probe's reads: reading again would push the action past its
-      // 30 s timeout when a bridge does not answer.
-      await this.syncDevices({ force: true, reads: new Map(probed.map(({ bridge }, i) => [bridge, reads[i]])) });
+      // From the probe's reads (of the bridges that did not change meanwhile):
+      // reading again would push the action past its 30 s timeout when a bridge
+      // does not answer.
+      const fresh = probed.flatMap(({ bridge }, index) => (unchanged[index] ? [[bridge, reads[index]]] : []));
+      await this.syncDevices({ force: true, reads: new Map(fresh) });
     } catch (error) {
       logger.warn(`Could not resynchronize after forgetting bridges: ${error.message}`);
       await this.reportStatus(true).catch((statusError) =>

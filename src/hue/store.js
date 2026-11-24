@@ -6,7 +6,7 @@
 // there. The path is overridable through `HUE_DATA_DIR` for local development
 // and tests.
 //
-// Shape persisted: { bridges: [{ id, ip, username, ... }], forgotten?: [{ id?, ip, platformKey }] }
+// Shape persisted: { bridges: [{ id, ip, username, ... }], forgotten?: [{ id?, ip, platformKey? }] }
 // -----------------------------------------------------------------------------
 
 import { promises as fs } from 'node:fs';
@@ -51,7 +51,7 @@ export class BridgeStore {
     /**
      * The `platformKey` of forgotten bridges, given back if they are paired again
      * (see `remove`).
-     * @type {Array<{ id?: string, ip: string, platformKey: string }>}
+     * @type {Array<{ id?: string, ip: string, platformKey?: string }>}
      */
     this.forgotten = [];
   }
@@ -152,11 +152,15 @@ export class BridgeStore {
       }
       Object.assign(existing, bridge);
     } else {
-      const forgotten = this.forgotten.find((entry) => forgottenMatches(entry, bridge));
+      // By id first: a bridge with an id paired at the old address of a forgotten
+      // id-less bridge must not take over that bridge's key.
+      const forgotten =
+        (bridge.id && this.forgotten.find((entry) => entry.id === bridge.id)) ||
+        this.forgotten.find((entry) => !entry.id && entry.ip === bridge.ip);
       if (forgotten) {
         // Forgotten, then paired again: its lights keep their external_ids.
         this.forgotten = this.forgotten.filter((entry) => entry !== forgotten);
-        this.bridges.push({ ...bridge, platformKey: forgotten.platformKey });
+        this.bridges.push({ ...bridge, ...(forgotten.platformKey ? { platformKey: forgotten.platformKey } : {}) });
       } else {
         this.bridges.push(bridge);
       }
@@ -177,17 +181,21 @@ export class BridgeStore {
    * The external_ids of a bridge's lights are built from `platformKey || id ||
    * ip`. A bridge paired by 1.0.x/1.1.0 relies on its IP (`platformKey`, or no id
    * at all): that key is kept in `forgotten`, so pairing the bridge again gives
-   * its lights back the same external_ids instead of new devices.
+   * its lights back the same external_ids instead of new devices. A bridge with
+   * an id is kept there too, without a key: pairing it again then finds it by id,
+   * instead of matching an id-less entry by address.
    * @param {Array<object>} bridges - Entries of `list()` to remove.
    * @returns {Promise<Error | undefined>} The error of saving the removal, if any (also in `persistError`).
    */
   async remove(bridges) {
     for (const bridge of bridges) {
       const platformKey = bridge.platformKey || (bridge.id ? undefined : bridge.ip);
-      if (platformKey) {
-        const entry = { ...(bridge.id ? { id: bridge.id } : {}), ip: bridge.ip, platformKey };
-        this.forgotten = [...this.forgotten.filter((known) => !forgottenMatches(known, bridge)), entry];
-      }
+      const entry = {
+        ...(bridge.id ? { id: bridge.id } : {}),
+        ip: bridge.ip,
+        ...(platformKey ? { platformKey } : {}),
+      };
+      this.forgotten = [...this.forgotten.filter((known) => !forgottenMatches(known, bridge)), entry];
     }
     this.bridges = this.bridges.filter((bridge) => !bridges.includes(bridge));
     try {

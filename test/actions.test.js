@@ -193,13 +193,16 @@ test('forgetBridges names the bridges it forgot and says their lights stay', asy
   const message = await forgetBridgesAction(
     makeForgetManager({ paired: [{ ip: '192.168.1.10' }, old], forgotten: [old] }),
   );
-  assert.match(message.en, /Forgot 1 bridge\(s\) that no longer answer: 192\.168\.1\.20\. Their lights stay/);
+  assert.match(
+    message.en,
+    /Forgot 1 bridge\(s\) that no longer answer, or no longer accept the integration: 192\.168\.1\.20\. Their lights stay/,
+  );
   assert.match(message.fr, /192\.168\.1\.20/);
 });
 
 test('forgetBridges says when every bridge answers', async () => {
   const message = await forgetBridgesAction(makeForgetManager({ paired: [{ ip: '192.168.1.10' }] }));
-  assert.match(message.en, /No bridge to forget: every paired bridge \(1\) answers\.$/);
+  assert.match(message.en, /No bridge to forget: every paired bridge answers\.$/);
 });
 
 test('forgetBridges says which busy bridge it kept', async () => {
