@@ -4,6 +4,12 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
 
 ## [Unreleased]
 
+### Fixed
+
+- A Gladys scene acting on many lights at once no longer loses commands: the
+  requests to a bridge are now spaced out, and retried a few times when the
+  bridge says it is busy.
+
 ## [2.1.0] - 2026-11-24
 
 ### Added

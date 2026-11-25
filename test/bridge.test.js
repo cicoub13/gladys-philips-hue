@@ -1,6 +1,7 @@
 import { test, mock, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { HueBridgeClient, HUE_LINK_BUTTON_NOT_PRESSED, findHueError } from '../src/hue/bridge.js';
+import { RequestQueue } from '../src/hue/queue.js';
 import { stubHttps } from './fake-https.js';
 
 const USERNAME = 'super-secret-username';
@@ -118,6 +119,61 @@ test('a bridge overloaded with 503 is retried', async () => {
   const { calls } = mockFetch([{ ok: false, status: 503 }, { body: {} }]);
   await new HueBridgeClient('192.168.1.10', USERNAME).getLights();
   assert.equal(calls.length, 2);
+});
+
+test('a busy bridge is retried several times, each time later', async (t) => {
+  // A burst of commands (a scene on 15 lights) gets 429/503 for a moment: one
+  // retry 400 ms later used to lose the command.
+  const { calls } = mockFetch([
+    { ok: false, status: 429 },
+    { ok: false, status: 503 },
+    { ok: false, status: 503 },
+    { body: { 3: { name: 'Salon' } } },
+  ]);
+  const delays = [];
+  const setTimeoutOriginal = global.setTimeout;
+  t.mock.method(global, 'setTimeout', (callback, delay) => {
+    delays.push(delay);
+    return setTimeoutOriginal(callback, 0);
+  });
+  assert.deepEqual(await new HueBridgeClient('192.168.1.10', USERNAME).getLights(), { 3: { name: 'Salon' } });
+  assert.equal(calls.length, 4);
+  // The pauses between attempts, without the queue spacing and the request timeouts.
+  assert.deepEqual(
+    delays.filter((delay) => delay !== 100 && delay !== 8000),
+    [250, 500, 1000],
+  );
+});
+
+test('a bridge that stays busy fails the request after the last retry', async (t) => {
+  const { calls } = mockFetch([{ ok: false, status: 503 }]);
+  const setTimeoutOriginal = global.setTimeout;
+  t.mock.method(global, 'setTimeout', (callback) => setTimeoutOriginal(callback, 0));
+  const client = new HueBridgeClient('192.168.1.10', USERNAME);
+  await assert.rejects(() => client.getLights(), /HTTP 503/);
+  assert.equal(calls.length, 4);
+});
+
+test('a bridge that does not answer is retried once only: each attempt costs a full timeout', async () => {
+  const { calls } = mockFetch([{ throws: new Error('connect EHOSTUNREACH') }]);
+  await assert.rejects(() => new HueBridgeClient('192.168.1.10', USERNAME).getLights(), /EHOSTUNREACH/);
+  assert.equal(calls.length, 2);
+});
+
+test('the requests of a bridge share its queue', async () => {
+  let inFlight = 0;
+  let most = 0;
+  mock.method(global, 'fetch', async () => {
+    inFlight += 1;
+    most = Math.max(most, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    inFlight -= 1;
+    return { ok: true, status: 200, json: async () => [{ success: {} }] };
+  });
+  const queue = new RequestQueue({ spacingMs: 0 });
+  const clients = [1, 2, 3, 4, 5].map(() => new HueBridgeClient('192.168.1.10', USERNAME, { queue }));
+  await Promise.all(clients.map((client, index) => client.setLightState(String(index), { on: true })));
+  assert.equal(most, 3);
 });
 
 test('a business error is never retried', async () => {

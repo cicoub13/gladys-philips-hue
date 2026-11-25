@@ -20,7 +20,7 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
   one `getLights()` per bridge through `refreshLights()`, only for lights in `gladys.devices` (created).
   `refreshLights` skips a light whose `commandSeq` (set after an accepted command or scene recall) is newer
   than the read, so a stale read never flips Gladys back after the echo.
-- `src/hue/`: `bridge.js` (v1 REST client), `https.js` (`node:https` transport + TLS pinning),
+- `src/hue/`: `bridge.js` (v1 REST client), `queue.js` (per-bridge request pacing), `https.js` (`node:https` transport + TLS pinning),
   `identify.js` (proves a candidate is a bridge), `discovery.js`, `mapping.js` and `scenes.js` (pure),
   `store.js` (`/data/bridges.json`).
 - `src/actions.js` returns `{ en, fr }` messages; pairing outcome is split into
@@ -38,8 +38,12 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
   (`isUnreachable()` in manager relies on this distinction for connection status).
 - Type `101` = link button not pressed (`HUE_LINK_BUTTON_NOT_PRESSED`).
 - The username is a full-access key: never let it reach a log/error (`redact()`); store file is `0600`.
-- Retries: 1 retry after 400 ms for network errors and 429/5xx; Hue business errors never retried.
-  `createUser` has `retries: 0` (not idempotent, bridge holds ~63 users). Timeout 8 s (3.5 s when identifying).
+- Every request of a stored bridge goes through its `RequestQueue` (`manager.queueOf(bridge)`, shared
+  by all its clients): at most 3 in flight, one start per 100 ms (the bridge takes ~10 req/s).
+- Retries: 1 retry after 400 ms for a request that got no answer; up to 3 for a busy answer (429/5xx),
+  after 250/500/1000 ms, each attempt queued again (a command must answer within Gladys' 5 s). Hue
+  business errors never retried. `retries: 0` disables both: `createUser` (not idempotent, bridge
+  holds ~63 users) and identification. Timeout 8 s (3.5 s when identifying).
 - Identification: unauthenticated `GET /api/config`; needs `bridgeid` + (`modelid` or `apiversion`).
   Tries HTTPS then HTTP; stops if something answered but isn't a bridge. Over HTTPS the cert CN
   must equal the announced `bridgeid`, else it falls back to HTTP. Whole action must fit the
@@ -68,7 +72,8 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
   (never reports 0 %, since 0 % means "off" on commands); color RGB int ↔ `xy` (read at full luminance, `Y = 1`, so dimming does not darken it); temperature is
   mireds passthrough clamped to `capabilities.control.ct` (default 153..500).
 - `setValue` echoes the value and the implied `on-off=1`, except the on/off of a light whose cached
-  state says `reachable: false` (it then re-reads that light right away); the SDK's `gladys.publishChangedStates` skips
+  state says `reachable: false` (it then re-reads that light 1 s later, `refreshSoon`: one read per
+  bridge for all the commands sent meanwhile); the SDK's `gladys.publishChangedStates` skips
   unchanged values (it remembers what Gladys accepted and forgets a device the user creates, updates or
   deletes).
 

@@ -18,6 +18,7 @@ import { HueBridgeClient, HUE_LINK_BUTTON_NOT_PRESSED } from './hue/bridge.js';
 import { discoverBridges } from './hue/discovery.js';
 import { identifyBridges, parseBridgeConfig } from './hue/identify.js';
 import { BridgeStore } from './hue/store.js';
+import { RequestQueue } from './hue/queue.js';
 import { FEATURE, featureValueToHueState, hueStateToFeatureStates, lightToDevicePayload } from './hue/mapping.js';
 import { findScene, listSceneCandidates } from './hue/scenes.js';
 
@@ -45,6 +46,10 @@ const SILENT_FORGET_MS = 5 * 60 * 1000;
 
 // Hue error type of a username the bridge no longer knows (bridge reset).
 const HUE_UNAUTHORIZED_USER = 1;
+
+// A command to a light cut at the wall reads it again this long after, in one read
+// shared with the other commands sent meanwhile (a scene switching on several).
+const REFRESH_COALESCE_MS = 1000;
 
 // A light missing from the registry triggers a full resync, at most this often
 // (a device deleted on the bridge side would otherwise resync on every command).
@@ -152,6 +157,10 @@ export class HueManager {
     this.pendingTransports = new Map();
     // Tail of the lock shared by Forget and pairing (see `exclusive`).
     this.bridgeLock = Promise.resolve();
+    /** @type {WeakMap<object, RequestQueue>} The request queue of each stored bridge (see `queueOf`). */
+    this.queues = new WeakMap();
+    /** @type {Map<object, Set<string>>} Hue ids of the lights to read again soon, by bridge (see `refreshSoon`). */
+    this.pendingRefreshes = new Map();
   }
 
   /**
@@ -189,6 +198,19 @@ export class HueManager {
   }
 
   /**
+   * The request queue of a stored bridge, shared by all its clients, so that
+   * commands, refreshes and scenes sent at once do not overload it.
+   * @param {object} bridge - Stored bridge.
+   * @returns {RequestQueue} Its queue.
+   */
+  queueOf(bridge) {
+    if (!this.queues.has(bridge)) {
+      this.queues.set(bridge, new RequestQueue());
+    }
+    return this.queues.get(bridge);
+  }
+
+  /**
    * Build a client for a stored bridge.
    * @param {{ ip: string, username: string }} bridge - Bridge credentials.
    * @returns {HueBridgeClient} Client.
@@ -200,6 +222,7 @@ export class HueManager {
       scheme: bridge.scheme,
       id: bridge.id,
       certFingerprint: bridge.certFingerprint,
+      queue: this.queueOf(bridge),
       // A bridge paired over HTTP whose firmware now blocks it: remember that it
       // answers on HTTPS, and the certificate pinned on the way. Unless it was
       // forgotten while this call was in flight: it must not come back.
@@ -705,7 +728,7 @@ export class HueManager {
     // Gladys accepted, and forgets a light the user creates, updates or deletes.
     // A light cut at the wall accepts commands but stays dark: its on/off is not
     // echoed. Its power may have come back since the last refresh, so it is read
-    // again right after (not awaited, like after a scene).
+    // again shortly after (see `refreshSoon`).
     const unpowered = Boolean(entry.light.state) && entry.light.state.reachable === false;
     const echoed = [];
     if (kind !== FEATURE.ON_OFF || !unpowered) {
@@ -718,8 +741,29 @@ export class HueManager {
       await this.gladys.publishChangedStates(echoed);
     }
     if (unpowered) {
-      this.refreshLights(bridge, client, [entry.hueId]);
+      this.refreshSoon(bridge, [entry.hueId]);
     }
+  }
+
+  /**
+   * Read some lights of a bridge again shortly, in ONE read shared with every
+   * other call made meanwhile: a scene switching on six lights cut at the wall
+   * would otherwise send six full reads at once, on top of its commands.
+   * @param {object} bridge - Stored bridge.
+   * @param {string[]} hueIds - Hue ids of the lights.
+   */
+  refreshSoon(bridge, hueIds) {
+    let pending = this.pendingRefreshes.get(bridge);
+    if (!pending) {
+      pending = new Set();
+      this.pendingRefreshes.set(bridge, pending);
+      const timer = setTimeout(() => {
+        this.pendingRefreshes.delete(bridge);
+        this.refreshLights(bridge, this.clientFor(bridge), [...pending]);
+      }, REFRESH_COALESCE_MS);
+      timer.unref();
+    }
+    hueIds.forEach((hueId) => pending.add(hueId));
   }
 
   /**

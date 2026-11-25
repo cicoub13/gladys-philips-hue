@@ -1376,7 +1376,7 @@ test('a light is shown cut at the wall only after two reads in a row', async () 
   assert.equal(gladys.fake.transports.at(-1).transport, 'unreachable');
 });
 
-test('a command to a light cut at the wall reads it again, in case its power came back', async () => {
+test('a command to a light cut at the wall reads it again, in case its power came back', async (t) => {
   const { manager, gladys, client } = await makeManager();
   const deviceId = await createAll(manager, gladys);
   client.getLights = async () => ({ 3: structuredClone(client.light) });
@@ -1384,12 +1384,37 @@ test('a command to a light cut at the wall reads it again, in case its power cam
   await manager.pollLights();
   await manager.pollLights();
 
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   client.light.state = { ...client.light.state, reachable: true }; // switched back on
   await manager.setValue({ external_id: deviceId }, { external_id: `${deviceId}:on-off` }, 1);
+  t.mock.timers.tick(1000);
   await settle();
   const onOff = gladys.fake.states.findLast((s) => s.device_feature_external_id === `${deviceId}:on-off`);
   assert.equal(onOff.state, 1);
   assert.equal(gladys.fake.transports.at(-1).transport, 'local');
+});
+
+test('commands to several lights cut at the wall share one read of their bridge', async (t) => {
+  // A scene switching on six unpowered lamps used to send six full reads at
+  // once, on top of its six commands.
+  const { manager, gladys, client } = await makeManager();
+  client.getLights = async () => ({
+    3: structuredClone(client.light),
+    4: { ...structuredClone(client.light), uniqueid: '00:17:88:01:bb' },
+  });
+  const [first, second] = [await createAll(manager, gladys), gladys.devices[1].external_id];
+  client.light.state = { ...client.light.state, on: false, reachable: false };
+  await manager.pollLights();
+  await manager.pollLights();
+  const reads = countReads(client);
+
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await manager.setValue({ external_id: first }, { external_id: `${first}:on-off` }, 1);
+  await manager.setValue({ external_id: second }, { external_id: `${second}:on-off` }, 1);
+  assert.equal(reads.count, 0, 'not right away');
+  t.mock.timers.tick(1000);
+  await settle();
+  assert.equal(reads.count, 1);
 });
 
 test('a bridge that answered 503, then misses the probe, is not forgotten on the first click', async () => {

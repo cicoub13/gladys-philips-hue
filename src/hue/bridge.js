@@ -24,17 +24,25 @@
 
 import { createLogger } from '@gladysassistant/integration-sdk';
 import { requestJson } from './https.js';
+import { RequestQueue } from './queue.js';
 
 const logger = createLogger({ name: 'hue-bridge' });
 
 const REQUEST_TIMEOUT_MS = 8000;
 
-// A bridge under load answers 429/503; a Wi-Fi hiccup rejects the fetch outright.
-// Both are worth one short retry — a lost command means a light that ignores the
-// user. Hue business errors are NEVER retried: they would fail identically.
+// A Wi-Fi hiccup rejects the fetch outright: worth one short retry, a lost
+// command means a light that ignores the user. Not more: a bridge that does not
+// answer costs a full timeout per attempt. Hue business errors are NEVER
+// retried: they would fail identically.
 const DEFAULT_RETRIES = 1;
 const RETRY_DELAY_MS = 400;
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+// A bridge under load answers 429/503 right away: retried a few times, each one
+// later than the last. Every attempt queues again behind the other requests to
+// the bridge (see ./queue.js), so a burst of commands spreads out instead of
+// failing, within the 5 s Gladys gives a command.
+const BUSY_RETRY_DELAYS_MS = [250, 500, 1000];
 
 // Hue error type returned while the physical link button has NOT been pressed.
 export const HUE_LINK_BUTTON_NOT_PRESSED = 101;
@@ -103,10 +111,11 @@ export class HueBridgeClient {
   /**
    * @param {string} ip - Bridge IP address on the local network.
    * @param {string} [username] - Bridge API username (a.k.a. application key).
-   * @param {{ scheme?: string, id?: string, certFingerprint?: string, timeoutMs?: number,
+   * @param {{ scheme?: string, id?: string, certFingerprint?: string, timeoutMs?: number, queue?: RequestQueue,
    *   onHttpsUpgrade?: (transport: { scheme: string, certFingerprint?: string }) => Promise<void> }} [options] -
    * Transport details resolved at identification time (see `./identify.js`) and persisted by the store.
-   * `onHttpsUpgrade` enables the switch to HTTPS of a bridge that blocks HTTP, and persists it.
+   * `onHttpsUpgrade` enables the switch to HTTPS of a bridge that blocks HTTP, and persists it. `queue` is
+   * shared by every client of the same bridge (see `./queue.js`).
    */
   constructor(ip, username, options = {}) {
     this.ip = ip;
@@ -121,6 +130,7 @@ export class HueBridgeClient {
     // it shortens this; normal traffic keeps the generous default.
     this.timeoutMs = options.timeoutMs || REQUEST_TIMEOUT_MS;
     this.onHttpsUpgrade = options.onHttpsUpgrade;
+    this.queue = options.queue || new RequestQueue();
   }
 
   /**
@@ -279,17 +289,19 @@ export class HueBridgeClient {
    * Perform an HTTP request to the bridge, retrying transient failures, and
    * surface the Hue errors hidden in HTTP 200 bodies as thrown errors.
    * @param {string} path - Path appended to `http://<ip>`.
-   * @param {object} [options] - Fetch options, plus `retries` (default 1).
+   * @param {object} [options] - Fetch options, plus `retries`: retries of a request that got no answer (default
+   * 1). `0` also disables the retries of a busy answer (429/5xx).
    * @returns {Promise<any>} Parsed JSON response, guaranteed error-free.
    * @throws {Error} With `.hueErrorType` set for a Hue business error.
    */
   async request(path, options = {}) {
     const { retries = DEFAULT_RETRIES, ...fetchOptions } = options;
-    let lastError;
+    let silentRetries = 0;
+    let busyRetries = 0;
 
-    for (let attempt = 0; attempt <= retries; attempt += 1) {
+    for (;;) {
       try {
-        const body = await this.fetchOnce(path, fetchOptions);
+        const body = await this.queue.run(() => this.fetchOnce(path, fetchOptions));
         const hueError = findHueError(body);
         if (hueError) {
           // A business error: the bridge understood us and said no. Retrying
@@ -302,17 +314,22 @@ export class HueBridgeClient {
         }
         return body;
       } catch (error) {
-        const retryable = error.httpStatus === undefined || RETRYABLE_STATUS.has(error.httpStatus);
-        if (error.hueErrorType !== undefined || !retryable || attempt === retries) {
+        let delay;
+        if (error.hueErrorType !== undefined) {
+          throw error;
+        } else if (error.httpStatus === undefined && silentRetries < retries) {
+          silentRetries += 1;
+          delay = RETRY_DELAY_MS;
+        } else if (RETRYABLE_STATUS.has(error.httpStatus) && retries > 0 && busyRetries < BUSY_RETRY_DELAYS_MS.length) {
+          delay = BUSY_RETRY_DELAYS_MS[busyRetries];
+          busyRetries += 1;
+        } else {
           throw error;
         }
-        lastError = error;
         logger.debug(`Retrying ${this.redact(path)} on bridge ${this.ip}: ${error.message}`);
-        await sleep(RETRY_DELAY_MS);
+        await sleep(delay);
       }
     }
-
-    throw lastError;
   }
 
   /**
