@@ -1,6 +1,6 @@
 {
   "name": "gladys-philips-hue",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "description": "Philips Hue external integration for Gladys Assistant (lights: on/off, brightness, color, white temperature).",
   "type": "module",
