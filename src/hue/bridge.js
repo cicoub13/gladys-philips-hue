@@ -1,9 +1,11 @@
 // -----------------------------------------------------------------------------
-// Philips Hue bridge REST client (local network, v1 API).
+// Philips Hue bridge REST client (local network).
 //
-// We deliberately use the classic v1 API (`/api/...`):
+// Lights are read and commanded through the classic v1 API (`/api/...`):
 //   - it is available on every Hue bridge generation (v1 round, v2 square), and
 //   - it is more than enough to control lights.
+// From the v2 API (`/clip/v2/...`, HTTPS only), the client only opens the event
+// stream and reads what it takes to understand it (see `./v2.js`).
 //
 // New pairings use HTTPS whenever the bridge serves it, and plain HTTP otherwise
 // (BSB001). A bridge paired over HTTP keeps using it until its firmware blocks
@@ -23,7 +25,7 @@
 // -----------------------------------------------------------------------------
 
 import { createLogger } from '@gladysassistant/integration-sdk';
-import { requestJson } from './https.js';
+import { openStream, requestJson } from './https.js';
 import { RequestQueue } from './queue.js';
 
 const logger = createLogger({ name: 'hue-bridge' });
@@ -425,6 +427,72 @@ export class HueBridgeClient {
     return this.request(`/api/${this.username}/groups/${groupId}/action`, {
       method: 'PUT',
       body: JSON.stringify({ scene: sceneId }),
+    });
+  }
+
+  /**
+   * Move a bridge paired over HTTP to HTTPS now, without waiting for its
+   * firmware to block HTTP: the v2 API, and its event stream, only exist over
+   * HTTPS. Same proof and persistence as the switch of a blocked bridge.
+   * @returns {Promise<void>} Resolves once the client talks HTTPS.
+   * @throws {Error} Why HTTPS failed: `code` `ECONNREFUSED` when the bridge has no HTTPS at all (round bridge),
+   * `tlsRefused` or `wrongBridge` when what answers is not this bridge.
+   */
+  async switchToHttps() {
+    if (this.scheme !== 'https') {
+      await this.probeHttps();
+    }
+  }
+
+  /**
+   * Whether the bridge serves the v2 API: it refuses `/clip/v2/resource`
+   * without a key (403), like aiohue's `is_v2_bridge` checks. The round bridge,
+   * and square bridges older than firmware 1.48, answer 404. HTTPS only.
+   * @returns {Promise<boolean>} True for a v2 bridge.
+   * @throws {Error} When the bridge did not answer at all.
+   */
+  async isV2() {
+    if (this.scheme !== 'https') {
+      return false;
+    }
+    try {
+      await this.queue.run(() => this.fetchWith('/clip/v2/resource', {}));
+      return false;
+    } catch (error) {
+      if (error.httpStatus === undefined) {
+        throw error;
+      }
+      return error.httpStatus === 403;
+    }
+  }
+
+  /**
+   * Read every v2 resource of a type (`light`, `zigbee_connectivity`…).
+   * @param {string} type - Resource type.
+   * @returns {Promise<Array<object>>} The resources.
+   */
+  async getResources(type) {
+    this.assertUsername();
+    const body = await this.queue.run(() =>
+      this.fetchWith(`/clip/v2/resource/${type}`, { headers: { 'hue-application-key': this.username } }),
+    );
+    return Array.isArray(body && body.data) ? body.data : [];
+  }
+
+  /**
+   * Open the v2 event stream. Not queued: it stays open.
+   * @returns {Promise<{ response: import('node:http').IncomingMessage, close: () => void }>} The open stream.
+   */
+  openEventStream() {
+    this.assertUsername();
+    if (this.scheme !== 'https') {
+      return Promise.reject(new Error(`Bridge ${this.ip} has no event stream over HTTP`));
+    }
+    return openStream(`https://${this.ip}/eventstream/clip/v2`, {
+      headers: { Accept: 'text/event-stream', 'hue-application-key': this.username },
+      timeoutMs: this.timeoutMs,
+      pinnedFingerprint: this.certFingerprint,
+      bridgeId: this.id,
     });
   }
 

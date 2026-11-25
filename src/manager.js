@@ -22,6 +22,8 @@ import { BridgeStore } from './hue/store.js';
 import { RequestQueue } from './hue/queue.js';
 import { FEATURE, featureValueToHueState, hueStateToFeatureStates, lightToDevicePayload } from './hue/mapping.js';
 import { findScene, listSceneCandidates } from './hue/scenes.js';
+import { EventStream } from './hue/eventstream.js';
+import { indexResources, lightPatches } from './hue/v2.js';
 
 const logger = createLogger({ name: 'hue-manager' });
 
@@ -51,6 +53,11 @@ const HUE_UNAUTHORIZED_USER = 1;
 // A command to a light cut at the wall reads it again this long after, in one read
 // shared with the other commands sent meanwhile (a scene switching on several).
 const REFRESH_COALESCE_MS = 1000;
+
+// The changes the event stream pushes are published at most once per this
+// interval per bridge, merged: a dimmer button held down sends a change every
+// few hundred ms per light, and Gladys takes 300 states per minute.
+const EVENT_THROTTLE_MS = 1000;
 
 // A light missing from the registry triggers a full resync, at most this often
 // (a device deleted on the bridge side would otherwise resync on every command).
@@ -205,6 +212,16 @@ export class HueManager {
     this.queues = new WeakMap();
     /** @type {Map<object, Set<string>>} Hue ids of the lights to read again soon, by bridge (see `refreshSoon`). */
     this.pendingRefreshes = new Map();
+    /** @type {Map<object, { stream: EventStream, ip: string }>} The v2 event stream of each stored bridge. */
+    this.streams = new Map();
+    /** @type {WeakSet<object>} Bridges without the v2 API (round bridge, old firmware): polled only. */
+    this.withoutPush = new WeakSet();
+    /** @type {Map<object, Map<string, object>>} Pushed changes waiting to be published, by bridge. */
+    this.pendingPatches = new Map();
+    /** @type {Map<object, NodeJS.Timeout>} Throttle of the pushed changes, by bridge (see `queuePatches`). */
+    this.patchTimers = new Map();
+    // Pushed changes are published one batch at a time, in order.
+    this.patchQueue = Promise.resolve();
   }
 
   /**
@@ -461,6 +478,8 @@ export class HueManager {
    * @returns {Promise<Array<object>>} The devices published (empty if none).
    */
   async syncDevices({ force = false, reads } = {}) {
+    // The stored bridges may have changed (paired, forgotten, moved).
+    this.syncStreams();
     if (this.store.list().length === 0) {
       // Nothing left to be unreachable, nor to retry.
       this.unreachable.clear();
@@ -552,6 +571,11 @@ export class HueManager {
     }
     this.recordSilence(bridge, reachable);
     this.scheduleResync();
+    const pushed = this.streams.get(bridge);
+    if (!reachable && pushed) {
+      // Its event stream may be dead too, without knowing it yet.
+      pushed.stream.reconnect();
+    }
     try {
       await this.reportStatus();
     } catch (error) {
@@ -675,16 +699,206 @@ export class HueManager {
   startPolling() {
     this.polling = true;
     this.armPoll();
+    this.syncStreams();
   }
 
   /**
-   * Stop the refresh loop (disconnection, shutdown). A refresh in progress ends
-   * normally but does not arm the next one.
+   * Stop the refresh loop and the event streams (disconnection, shutdown). A
+   * refresh in progress ends normally but does not arm the next one.
    */
   stopPolling() {
     this.polling = false;
     clearTimeout(this.pollTimer);
     this.pollTimer = undefined;
+    this.syncStreams();
+  }
+
+  /**
+   * Keep one v2 event stream open per stored bridge while connected to Gladys:
+   * close the ones of the bridges forgotten or moved, open the missing ones.
+   * The refresh loop keeps running beside them, as a safety net (an event lost
+   * while a stream reconnects) and for the bridges without v2.
+   */
+  syncStreams() {
+    const active = this.polling && !this.stopped;
+    for (const [bridge, { stream, ip }] of this.streams) {
+      if (!active || !this.store.list().includes(bridge) || bridge.ip !== ip) {
+        stream.stop();
+        this.streams.delete(bridge);
+      }
+    }
+    if (!active) {
+      return;
+    }
+    for (const bridge of this.store.list()) {
+      if (!this.streams.has(bridge) && !this.withoutPush.has(bridge) && bridge.username) {
+        this.startStream(bridge);
+      }
+    }
+  }
+
+  /**
+   * Open the event stream of a bridge, and keep it open.
+   * @param {object} bridge - Stored bridge.
+   */
+  startStream(bridge) {
+    let index;
+    const stream = new EventStream({
+      name: `bridge ${bridge.ip}`,
+      open: async () => {
+        const opened = await this.openEventStream(bridge);
+        index = opened.index;
+        return opened;
+      },
+      onEvents: (events) => this.queuePatches(bridge, lightPatches(events, index)),
+      // Catch up with what changed while it was closed.
+      onOpen: () => this.refreshSoon(bridge, this.createdHueIdsOf(bridge)),
+      onGiveUp: () => {
+        this.withoutPush.add(bridge);
+        if (this.streams.get(bridge) && this.streams.get(bridge).stream === stream) {
+          this.streams.delete(bridge);
+        }
+      },
+    });
+    this.streams.set(bridge, { stream, ip: bridge.ip });
+    stream.start();
+  }
+
+  /**
+   * Connect to the event stream of a bridge. A bridge paired over HTTP is moved
+   * to HTTPS first: v2 only exists there.
+   * @param {object} bridge - Stored bridge.
+   * @returns {Promise<{ response: object, close: () => void, index: object }>} The open stream, and the index
+   * of the resources its events name.
+   * @throws {Error} With `permanent` set when the bridge has no event stream (round bridge, old firmware).
+   */
+  async openEventStream(bridge) {
+    const client = this.clientFor(bridge);
+    try {
+      await client.switchToHttps();
+    } catch (error) {
+      // No HTTPS at all, or something else than the bridge answers there.
+      error.permanent = error.code === 'ECONNREFUSED' || Boolean(error.tlsRefused || error.wrongBridge);
+      throw error;
+    }
+    if (!(await client.isV2())) {
+      const error = new Error('no v2 API');
+      error.permanent = true;
+      throw error;
+    }
+    const lights = await client.getResources('light');
+    const connectivities = await client.getResources('zigbee_connectivity');
+    const opened = await client.openEventStream();
+    return { ...opened, index: indexResources(lights, connectivities) };
+  }
+
+  /**
+   * Hue ids of the lights of a bridge created in Gladys, among the known ones.
+   * @param {object} bridge - Stored bridge.
+   * @returns {string[]} Hue ids.
+   */
+  createdHueIdsOf(bridge) {
+    const created = new Set(this.gladys.devices.map((device) => device.external_id));
+    const hueIds = [];
+    for (const [deviceId, entry] of this.registry) {
+      if (created.has(deviceId) && this.ownerOf(deviceId) === bridge) {
+        hueIds.push(entry.hueId);
+      }
+    }
+    return hueIds;
+  }
+
+  /**
+   * Publish the changes pushed by a bridge: at once for the first one, then
+   * merged, at most once per `EVENT_THROTTLE_MS`.
+   * @param {object} bridge - Stored bridge.
+   * @param {Map<string, object>} patches - Partial v1 state by Hue id.
+   */
+  queuePatches(bridge, patches) {
+    if (patches.size === 0) {
+      return;
+    }
+    const pending = this.pendingPatches.get(bridge) || new Map();
+    for (const [hueId, patch] of patches) {
+      pending.set(hueId, { ...pending.get(hueId), ...patch });
+    }
+    this.pendingPatches.set(bridge, pending);
+    if (!this.patchTimers.has(bridge)) {
+      this.flushPatches(bridge);
+    }
+  }
+
+  /**
+   * Publish the pushed changes waiting for a bridge, and hold the next ones for
+   * `EVENT_THROTTLE_MS`.
+   * @param {object} bridge - Stored bridge.
+   */
+  flushPatches(bridge) {
+    const pending = this.pendingPatches.get(bridge);
+    this.pendingPatches.delete(bridge);
+    if (!pending) {
+      this.patchTimers.delete(bridge);
+      return;
+    }
+    const timer = setTimeout(() => this.flushPatches(bridge), EVENT_THROTTLE_MS);
+    timer.unref();
+    this.patchTimers.set(bridge, timer);
+    this.patchQueue = this.patchQueue
+      .then(() => this.applyPatches(bridge, pending))
+      .catch((error) => logger.warn(`Could not publish the changes pushed by bridge ${bridge.ip}: ${error.message}`));
+  }
+
+  /**
+   * Apply changes pushed by a bridge to the lights it holds, and publish those
+   * created in Gladys. Like a command, they make a refresh that read the lights
+   * before skip them. A light reported cut at the wall is shown so after the
+   * same confirmation as a read (see `debounceUnreachable`).
+   * @param {object} bridge - Stored bridge.
+   * @param {Map<string, object>} patches - Partial v1 state by Hue id.
+   * @returns {Promise<void>} Resolves once published.
+   */
+  async applyPatches(bridge, patches) {
+    if (!this.store.list().includes(bridge)) {
+      return;
+    }
+    const created = new Set(this.gladys.devices.map((device) => device.external_id));
+    this.commandSeq += 1;
+    const entries = [];
+    const shown = {};
+    for (const [deviceId, entry] of this.registry) {
+      const patch = patches.get(entry.hueId);
+      if (!patch || this.ownerOf(deviceId) !== bridge) {
+        continue;
+      }
+      entry.commandSeq = this.commandSeq;
+      const light = this.debounceUnreachable(entry, { ...entry.light, state: { ...entry.light.state, ...patch } });
+      if (created.has(deviceId)) {
+        entries.push(entry);
+        shown[entry.hueId] = light;
+      }
+    }
+    try {
+      for (const entry of entries) {
+        await this.gladys.publishChangedStates(this.statesOf(entry, shown[entry.hueId]));
+      }
+    } catch (error) {
+      logger.warn(`Could not publish the states of the lights of bridge ${bridge.ip}: ${error.message}`);
+    }
+    await this.publishLightTransports(entries, shown);
+  }
+
+  /**
+   * The Gladys states of a light as it must be shown.
+   * @param {object} entry - Registry entry of the light.
+   * @param {object} light - Light to show.
+   * @returns {Array<{ device_feature_external_id: string, state: number }>} States for publishChangedStates.
+   */
+  statesOf(entry, light) {
+    const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
+    return hueStateToFeatureStates(ids, light).map((state) => ({
+      device_feature_external_id: state.external_id,
+      state: state.value,
+    }));
   }
 
   /**
@@ -722,17 +936,10 @@ export class HueManager {
    * @returns {Promise<void>} Resolves once done.
    */
   async pollLights() {
-    const created = new Set(this.gladys.devices.map((device) => device.external_id));
     await Promise.all(
-      this.store.list().map((bridge) => {
-        const hueIds = [];
-        for (const [deviceId, entry] of this.registry) {
-          if (created.has(deviceId) && this.ownerOf(deviceId) === bridge) {
-            hueIds.push(entry.hueId);
-          }
-        }
-        return this.refreshLights(bridge, this.clientFor(bridge), hueIds);
-      }),
+      this.store
+        .list()
+        .map((bridge) => this.refreshLights(bridge, this.clientFor(bridge), this.createdHueIdsOf(bridge))),
     );
     // Retry the transports that failed, even for lights no refresh covers any
     // more (those of a forgotten bridge).
@@ -856,6 +1063,9 @@ export class HueManager {
    * @param {string[]} hueIds - Hue ids of the lights.
    */
   refreshSoon(bridge, hueIds) {
+    if (hueIds.length === 0) {
+      return;
+    }
     let pending = this.pendingRefreshes.get(bridge);
     if (!pending) {
       pending = new Set();
@@ -981,11 +1191,7 @@ export class HueManager {
         const light = lights[entry.hueId];
         if (light && entry.commandSeq <= readSeq) {
           shown[entry.hueId] = this.debounceUnreachable(entry, light);
-          const ids = this.gladys.externalIds(DEVICE_TYPE, entry.platformId);
-          const states = hueStateToFeatureStates(ids, shown[entry.hueId]);
-          await this.gladys.publishChangedStates(
-            states.map((state) => ({ device_feature_external_id: state.external_id, state: state.value })),
-          );
+          await this.gladys.publishChangedStates(this.statesOf(entry, shown[entry.hueId]));
         }
       }
     } catch (error) {

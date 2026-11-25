@@ -1,4 +1,5 @@
 import { test, mock } from 'node:test';
+import { PassThrough } from 'node:stream';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -39,6 +40,10 @@ function makeFakeClient() {
       this.lastSetState = { id, state };
       Object.assign(light.state, state);
       return [{ success: true }];
+    },
+    // A round bridge: no HTTPS, so no v2 event stream (see withPush).
+    async switchToHttps() {
+      throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
     },
   };
 }
@@ -930,6 +935,199 @@ test('a new refresh interval re-arms the loop', async (t) => {
   t.mock.timers.tick(10000);
   await settle();
   assert.equal(reads.count, 2);
+  manager.stop();
+});
+
+/**
+ * Give a fake client the v2 API of a square bridge: its light 3 is the v2
+ * light `rid-3` of device `dev-3`, and the test writes to its event stream.
+ * @param {object} client - Fake bridge client.
+ * @returns {object} The same client, with `push(resources)` and its `streams`.
+ */
+function withPush(client) {
+  client.switchToHttps = async () => {};
+  client.isV2 = async () => true;
+  client.getResources = async (type) =>
+    type === 'light'
+      ? [{ id: 'rid-3', id_v1: '/lights/3', owner: { rid: 'dev-3', rtype: 'device' }, type: 'light' }]
+      : [{ id: 'zb-3', owner: { rid: 'dev-3', rtype: 'device' }, type: 'zigbee_connectivity' }];
+  client.streams = [];
+  client.openEventStream = async () => {
+    const response = new PassThrough();
+    const opened = { response, close: () => response.destroy() };
+    client.streams.push(opened);
+    return opened;
+  };
+  client.push = (resources) =>
+    client.streams.at(-1).response.write(`id: 1:0\ndata: ${JSON.stringify([{ type: 'update', data: resources }])}\n\n`);
+  return client;
+}
+
+// Let the stream connect, or a pushed message reach Gladys.
+const flush = async () => {
+  for (let step = 0; step < 10; step += 1) {
+    await settle();
+  }
+};
+
+/**
+ * makeManager() with its light created, connected to Gladys with the event
+ * stream of a square bridge open.
+ * @param {object} t - Test context (its timers are mocked).
+ * @returns {Promise<object>} Same as makeManager(), plus the on/off states published for the light.
+ */
+async function makePushManager(t) {
+  const made = await makeManager();
+  withPush(made.client);
+  await createAll(made.manager, made.gladys);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  made.manager.startPolling();
+  await flush();
+  made.onOff = () =>
+    made.gladys.fake.states
+      .filter((state) => state.device_feature_external_id === `${SALON_ID}:on-off`)
+      .map((state) => state.state);
+  return made;
+}
+
+test('a change pushed by the bridge shows up at once, on the device the user created', async (t) => {
+  // A dimmer, the Hue app or a Hue automation: until now it waited for the next
+  // refresh, up to a minute.
+  const { manager, client, onOff } = await makePushManager(t);
+  assert.equal(client.streams.length, 1);
+  client.push([{ id: 'rid-3', on: { on: true }, dimming: { brightness: 100 }, type: 'light' }]);
+  await flush();
+  assert.deepEqual(onOff(), [1]);
+  const brightness = manager.gladys.fake.states.findLast(
+    (state) => state.device_feature_external_id === `${SALON_ID}:brightness`,
+  );
+  assert.equal(brightness.state, 100);
+  manager.stop();
+});
+
+test('pushed changes are merged, at most one publication per second', async (t) => {
+  // A dimmer button held down sends a change every few hundred ms per light.
+  const { manager, gladys, client } = await makePushManager(t);
+  const brightness = () =>
+    gladys.fake.states
+      .filter((state) => state.device_feature_external_id === `${SALON_ID}:brightness`)
+      .map((state) => state.state);
+  client.light.state.bri = 254;
+  for (const percent of [10, 20, 30]) {
+    client.push([{ id: 'rid-3', dimming: { brightness: percent }, type: 'light' }]);
+    await flush();
+  }
+  assert.deepEqual(brightness(), [10], 'the first change at once');
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.deepEqual(brightness(), [10, 30], 'the last one after a second, not each of them');
+  manager.stop();
+});
+
+test('a light reported disconnected is shown off once a read confirms it, and back at once', async (t) => {
+  const { manager, gladys, client, onOff } = await makePushManager(t);
+  client.push([{ id: 'rid-3', on: { on: true }, type: 'light' }]);
+  await flush();
+  client.light.state = { ...client.light.state, on: true, reachable: false };
+
+  client.push([{ id: 'zb-3', status: 'connectivity_issue', type: 'zigbee_connectivity' }]);
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.deepEqual(onOff(), [1], 'one report may be a mesh blip');
+  await manager.pollLights();
+  assert.deepEqual(onOff(), [1, 0]);
+  assert.equal(gladys.fake.transports.at(-1).transport, 'unreachable');
+
+  client.push([
+    { id: 'zb-3', owner: { rid: 'dev-3', rtype: 'device' }, status: 'connected', type: 'zigbee_connectivity' },
+  ]);
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.deepEqual(onOff(), [1, 0, 1]);
+  assert.equal(gladys.fake.transports.at(-1).transport, 'local');
+  manager.stop();
+});
+
+test('a refresh that read the lights before a pushed change does not undo it', async (t) => {
+  const { manager, client, onOff } = await makePushManager(t);
+  let answer;
+  client.getLights = () =>
+    new Promise((resolve) => {
+      answer = () => resolve({ 3: structuredClone(client.light) }); // read while still off
+    });
+  const polled = manager.pollLights();
+  await flush();
+  client.push([{ id: 'rid-3', on: { on: true }, type: 'light' }]);
+  await flush();
+  answer();
+  await polled;
+  assert.deepEqual(onOff(), [1]);
+  manager.stop();
+});
+
+test('the stream catches up on what changed while it was closed', async (t) => {
+  const { manager, gladys, client, onOff } = await makePushManager(t);
+  const reads = countReads(client);
+  client.light.state.on = true;
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(reads.count, 1, 'one read of the bridge once the stream opened');
+  assert.deepEqual(onOff(), [1]);
+
+  client.light.state.on = false;
+  client.streams[0].response.destroy(); // dropped
+  await flush();
+  t.mock.timers.tick(1000); // reconnected
+  await flush();
+  t.mock.timers.tick(1000); // read again
+  await flush();
+  assert.equal(client.streams.length, 2);
+  assert.deepEqual(onOff(), [1, 0]);
+  assert.equal(gladys.fake.connectionStatus.connected, true);
+  manager.stop();
+});
+
+test('a bridge without the v2 API is polled only, and never asked again', async (t) => {
+  const { manager, gladys, client } = await makeManager();
+  await createAll(manager, gladys);
+  let asked = 0;
+  const switchToHttps = client.switchToHttps;
+  client.switchToHttps = () => {
+    asked += 1;
+    return switchToHttps();
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  manager.startPolling();
+  await flush();
+  await manager.syncDevices();
+  t.mock.timers.tick(60000);
+  await flush();
+  assert.equal(asked, 1);
+  assert.equal(manager.streams.size, 0);
+  manager.stop();
+});
+
+test('the stream of a forgotten bridge is closed, and every stream once disconnected from Gladys', async (t) => {
+  const { manager, store, client } = await makePushManager(t);
+  manager.stopPolling();
+  assert.equal(client.streams[0].response.destroyed, true);
+
+  manager.startPolling();
+  await flush();
+  assert.equal(client.streams.length, 2);
+  await store.remove([store.list()[0]]);
+  await manager.syncDevices();
+  assert.equal(client.streams[1].response.destroyed, true);
+  assert.equal(manager.streams.size, 0);
+  manager.stop();
+});
+
+test('a refresh that cannot reach the bridge opens its stream again', async (t) => {
+  // A bridge powered off: TCP takes minutes to notice the stream is dead.
+  const { manager, client } = await makePushManager(t);
+  client.down = true;
+  await manager.pollLights();
+  assert.equal(client.streams[0].response.destroyed, true);
   manager.stop();
 });
 

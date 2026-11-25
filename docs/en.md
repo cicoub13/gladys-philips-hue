@@ -17,10 +17,16 @@ Each Hue light is exposed as a Gladys device with the features it supports:
 | Color light             |   ✅   |     ✅     |  ✅   |                   |
 | Extended color light    |   ✅   |     ✅     |  ✅   |        ✅         |
 
-The integration reads your bridge at the interval you choose in **Refresh
-interval** (default: every minute): changes made outside Gladys — Hue app, wall
-switch, dimmer, Hue automations — show up in Gladys within that interval.
-Changes made from Gladys show up right away.
+Changes made outside Gladys — Hue app, wall switch, dimmer, Hue automations —
+show up in Gladys at once on a square bridge (firmware 1.48 or later) or a Hue
+Bridge Pro: the bridge pushes them to the integration. The integration also
+reads your bridge at the interval you choose in **Refresh interval** (default:
+every minute), as a safety net; on the round bridge, which pushes nothing,
+changes show up within that interval. Changes made from Gladys show up right
+away.
+
+To receive these changes, a bridge paired over plain HTTP is moved to HTTPS on
+its own, with no new pairing.
 
 A light powered off at the wall (its switch cut) shows as off in Gladys, with an
 **unreachable** badge on the Devices page, until it has power again.

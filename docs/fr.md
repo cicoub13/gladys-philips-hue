@@ -18,11 +18,17 @@ qu'elle prend en charge :
 | Color light             |      ✅      |     ✅     |   ✅    |                      |
 | Extended color light    |      ✅      |     ✅     |   ✅    |          ✅          |
 
-L'intégration interroge votre bridge à l'intervalle choisi dans **Intervalle de
-rafraîchissement** (toutes les minutes par défaut) : les changements faits hors
-de Gladys — application Hue, interrupteur mural, variateur, automatisations Hue
-— apparaissent dans Gladys dans cet intervalle. Ceux faits depuis Gladys
+Les changements faits hors de Gladys — application Hue, interrupteur mural,
+variateur, automatisations Hue — apparaissent immédiatement dans Gladys avec un
+bridge carré (firmware 1.48 ou plus récent) ou un Hue Bridge Pro : le bridge les
+envoie à l'intégration. L'intégration interroge aussi votre bridge à
+l'intervalle choisi dans **Intervalle de rafraîchissement** (toutes les minutes
+par défaut), par sécurité ; avec le bridge rond, qui n'envoie rien, les
+changements apparaissent dans cet intervalle. Ceux faits depuis Gladys
 apparaissent immédiatement.
+
+Pour recevoir ces changements, un bridge appairé en HTTP simple passe de
+lui-même en HTTPS, sans nouvel appairage.
 
 Une lampe coupée à l'interrupteur mural apparaît éteinte dans Gladys, avec un
 badge **injoignable** sur la page Appareils, jusqu'à ce qu'elle soit de nouveau

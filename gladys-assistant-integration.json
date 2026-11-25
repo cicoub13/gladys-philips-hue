@@ -47,8 +47,8 @@
         "fr": "Intervalle de rafraîchissement"
       },
       "description": {
-        "en": "How often the light states are refreshed from the bridge.",
-        "fr": "Fréquence de rafraîchissement de l'état des lampes depuis le bridge."
+        "en": "How often the light states are read from the bridge. A square bridge or a Bridge Pro also pushes changes at once: this refresh is then a safety net.",
+        "fr": "Fréquence de lecture de l'état des lampes depuis le bridge. Un bridge carré ou un Bridge Pro envoie aussi les changements immédiatement : ce rafraîchissement sert alors de filet de sécurité."
       },
       "required": false,
       "default": "60000",

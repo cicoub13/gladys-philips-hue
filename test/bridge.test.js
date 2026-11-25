@@ -412,3 +412,39 @@ test('a client without an upgrade hook never switches (identification)', async (
   await assert.rejects(() => new HueBridgeClient('192.168.1.10').getConfig({ retries: 0 }), /HTTP 403/);
   assert.equal(calls.length, 0);
 });
+
+test('isV2 tells a v2 bridge (403 without a key) from an older one', async () => {
+  const answers = { '192.168.1.10': 403, '192.168.1.11': 404 };
+  stubHttps((url) => {
+    const status = answers[new URL(url).hostname];
+    return status ? { status, body: {}, cn: BRIDGE_ID } : undefined;
+  });
+  const client = (ip) => new HueBridgeClient(ip, USERNAME, { scheme: 'https', id: BRIDGE_ID });
+  assert.equal(await client('192.168.1.10').isV2(), true);
+  assert.equal(await client('192.168.1.11').isV2(), false);
+  // Nothing answers: the next attempt will tell, not a definitive "no".
+  await assert.rejects(() => client('192.168.1.12').isV2(), /ECONNREFUSED/);
+  // v2 only exists over HTTPS.
+  assert.equal(await new HueBridgeClient('192.168.1.10', USERNAME).isV2(), false);
+});
+
+test('getResources reads v2 resources with the key in a header, never in the path', async () => {
+  const { calls } = stubHttps(() => ({ body: { errors: [], data: [{ id: 'a', type: 'light' }] }, cn: BRIDGE_ID }));
+  const client = new HueBridgeClient('192.168.1.10', USERNAME, { scheme: 'https', id: BRIDGE_ID });
+  assert.deepEqual(await client.getResources('light'), [{ id: 'a', type: 'light' }]);
+  assert.equal(calls[0].url, 'https://192.168.1.10/clip/v2/resource/light');
+});
+
+test('a bridge paired over HTTP can be moved to HTTPS before its firmware blocks HTTP', async () => {
+  stubHttps(bridgeOverHttps({}));
+  const { client, upgrades } = pairedOverHttp();
+  await client.switchToHttps();
+  assert.equal(client.scheme, 'https');
+  assert.equal(upgrades.length, 1, 'persisted');
+  await client.switchToHttps();
+  assert.equal(upgrades.length, 1, 'once');
+});
+
+test('the event stream is never opened over plain HTTP', async () => {
+  await assert.rejects(() => new HueBridgeClient('192.168.1.10', USERNAME).openEventStream(), /over HTTP/);
+});

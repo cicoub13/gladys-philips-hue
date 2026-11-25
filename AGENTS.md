@@ -18,17 +18,34 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
   devices already created. The manager refreshes on its own `setTimeout` chain (`startPolling` /
   `armPoll` / `runPoll`, never two runs at once, re-armed by `setConfig` when `poll_frequency` changes):
   one `getLights()` per bridge through `refreshLights()`, only for lights in `gladys.devices` (created).
-  `refreshLights` skips a light whose `commandSeq` (set after an accepted command or scene recall) is newer
-  than the read, so a stale read never flips Gladys back after the echo.
-- `src/hue/`: `bridge.js` (v1 REST client), `queue.js` (per-bridge request pacing), `https.js` (`node:https` transport + TLS pinning),
+  `refreshLights` skips a light whose `commandSeq` (set after an accepted command, a scene recall or a
+  pushed change) is newer than the read, so a stale read never flips Gladys back after the echo.
+- Push (v2 event stream): `startPolling` / `stopPolling` / `syncDevices` call `syncStreams()`, which keeps
+  one `EventStream` (`src/hue/eventstream.js`) per stored bridge while connected to Gladys (closed for
+  a forgotten or moved bridge). `openEventStream(bridge)`: `client.switchToHttps()` (a bridge stored as
+  `http` is moved to HTTPS proactively, same proof and persistence as the 403 switch), `isV2()`
+  (unauthenticated `GET /clip/v2/resource` → 403, like aiohue's `is_v2_bridge`), `getResources('light')` +
+  `('zigbee_connectivity')` for the index, then `GET /eventstream/clip/v2` (`openStream` in `https.js`:
+  same certificate check, TCP keepalive 30 s, not queued). No HTTPS (`ECONNREFUSED`), wrong certificate
+  or no v2 → `permanent`: `withoutPush`, polled only until restart. Anything else reconnects with backoff
+  (1 s → 1 min); a refresh that gets no answer calls `stream.reconnect()` (`markBridge`); each (re)connection
+  re-reads the created lights (`refreshSoon`). Events → `lightPatches` (`src/hue/v2.js`, pure: v2 light by
+  rid or `id_v1` → v1 hue id, zigbee_connectivity → `reachable` of every light of its device) →
+  `queuePatches` (first at once, then merged, at most one batch per bridge per 1 s, `EVENT_THROTTLE_MS`) →
+  `applyPatches` (cache, `commandSeq`, `debounceUnreachable`, created lights only, transports). The refresh
+  loop keeps running beside the streams, as a safety net and for the round bridge.
+- `src/hue/`: `bridge.js` (REST client: v1, plus the v2 calls of the push), `queue.js` (per-bridge request
+  pacing), `eventstream.js` (SSE + reconnection), `v2.js` (pure: v2 events → v1 state), `https.js` (`node:https` transport + TLS pinning),
   `identify.js` (proves a candidate is a bridge), `discovery.js`, `mapping.js` and `scenes.js` (pure),
   `store.js` (`/data/bridges.json`).
 - `src/actions.js` returns `{ en, fr }` messages; pairing outcome is split into
   `paired / pending / unreachable / notABridge` so the UI says what to do next.
 
-## Hue API (local v1, `/api/...`)
+## Hue API (local v1, `/api/...`; v2 for the push only)
 
-- v1 on purpose (every bridge generation). New pairings use HTTPS when the bridge serves it, HTTP
+- v1 on purpose for reads and commands (every bridge generation), and the external_ids come from the
+  v1 `uniqueid`, which v2 does not carry: v2 resources are matched to v1 lights by `id_v1`
+  (`/lights/<n>`). v2 is HTTPS only, the key goes in the `hue-application-key` header. New pairings use HTTPS when the bridge serves it, HTTP
   otherwise (BSB001). A bridge stored as `http` that answers 403 / refuses port 80 (firmware 1.78+) is
   switched once per client (`upgradeToHttps`): unauthenticated `/api/config` probe, cert CN must equal
   the announced (and stored) id, then `onHttpsUpgrade` persists it. `scheme` and `certFingerprint`
@@ -72,8 +89,8 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
   created lights (by `uniqueid` in the external_id) the new bridge holds. (2) and (3) go through
   `replaceBridge` → `store.replace(previous, { ...credentials, platformKey: platformKeyOf(previous) })`:
   the new bridge takes the old key, so the external_ids are kept; `result.replaced` feeds the message.
-- Polling only (no push/event stream). The bridge rate-limits ~10 req/s: the refresh loop and the
-  scene refresh do one `getLights()` per bridge, not one call per light.
+- The bridge rate-limits ~10 req/s: the refresh loop and the scene refresh do one `getLights()` per
+  bridge, not one call per light.
 
 ## Devices and external_ids (must stay stable)
 

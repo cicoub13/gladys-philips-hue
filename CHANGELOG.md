@@ -6,6 +6,12 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
 
 ### Added
 
+- Changes made outside Gladys (Hue app, dimmer, wall switch, Hue automations)
+  show up in Gladys at once with a square bridge (firmware 1.48 or later) or a
+  Hue Bridge Pro, instead of at the next refresh. The **Refresh interval** stays
+  as a safety net, and for the round bridge. A bridge paired over plain HTTP is
+  moved to HTTPS on its own to get them, with no new pairing.
+
 - A bridge that changed IP address is found again on its own, with no new
   pairing: the integration looks for it on your network in the background, and
   **Discover bridges** follows it right away.
