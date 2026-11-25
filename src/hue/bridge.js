@@ -85,7 +85,7 @@ export function isHttpBlocked(error) {
  * HTTPS failure (no answer, 429/5xx) is raised as such, so the request is
  * retried, and the bridge counted unreachable when nothing answered at all;
  * anything else (not the expected bridge, other status) keeps the
- * classification of the HTTP error.
+ * classification of the HTTP error, flagged `httpsSwitchFailed`.
  * @param {Error & { httpStatus?: number }} httpError - Why HTTP failed.
  * @param {Error & { httpStatus?: number, tlsRefused?: boolean, wrongBridge?: boolean }} httpsError - Why
  * HTTPS failed.
@@ -100,6 +100,11 @@ function upgradeFailure(httpError, httpsError) {
   const status = transient ? httpsError.httpStatus : httpError.httpStatus;
   if (status !== undefined) {
     error.httpStatus = status;
+  }
+  if (!transient) {
+    // The bridge answered (its 403) but cannot be used: callers must not take
+    // that answer as proof that it is gone.
+    error.httpsSwitchFailed = true;
   }
   return error;
 }

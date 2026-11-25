@@ -100,7 +100,7 @@ function countReads(client) {
  */
 function silentForLong(manager) {
   for (const key of manager.silentSince.keys()) {
-    manager.silentSince.set(key, Date.now() - 10 * 60 * 1000);
+    manager.silentSince.set(key, performance.now() - 10 * 60 * 1000);
   }
 }
 
@@ -1132,8 +1132,8 @@ test('a refresh still in flight when its bridge is forgotten does not bring it b
   dead.getLights = async () => {
     throw new Error('connect EHOSTUNREACH');
   };
-  manager.unreachable.add('192.168.1.20'); // it was already failing
-  manager.silentSince.set('b2', Date.now() - 10 * 60 * 1000);
+  manager.unreachable.add('b2'); // it was already failing
+  manager.silentSince.set('b2', performance.now() - 10 * 60 * 1000);
 
   await manager.forgetUnreachableBridges();
   failRead();
@@ -1336,17 +1336,20 @@ test('after Forget, the Discovery tab drops the forgotten lights, and keeps thos
 
 test('forgetting a bridge leaves alone another stored bridge at the same address', async () => {
   // The DHCP reservation moved to the Bridge Pro; the old bridge's pinned
-  // certificate no longer matches.
+  // certificate no longer matches, so its reads fail without an answer.
   const { manager, gladys, store } = await makeManager();
   await store.upsert({ id: 'b2', ip: '192.168.1.10', username: 'user-2' });
   const good = makeFakeClient();
   const old = makeFakeClient();
-  failReads(old, { message: 'HTTP 404', httpStatus: 404 });
   manager.clientFor = (bridge) => (bridge.id === 'b2' ? good : old);
   await createAll(manager, gladys);
+  failReads(old, { message: 'Refused the TLS certificate of 192.168.1.10', tlsRefused: true });
   await manager.pollLights();
   const before = gladys.fake.transports.length;
 
+  const first = await manager.forgetUnreachableBridges();
+  assert.deepEqual(first.forgotten, [], 'it may only be rebooting');
+  silentForLong(manager);
   const { forgotten } = await manager.forgetUnreachableBridges();
   assert.deepEqual(
     forgotten.map((bridge) => bridge.id),
@@ -1593,6 +1596,81 @@ test('a probe that succeeds clears the unreachable status', async () => {
   assert.deepEqual([forgotten, busy], [[], []]);
   assert.equal(gladys.fake.connectionStatus.connected, true);
   assert.equal(manager.silentSince.size, 0);
+  manager.stop();
+});
+
+test('the status does not flap between two stored bridges sharing an address', async () => {
+  // A dead bridge and its replacement at the same DHCP reservation: the
+  // replacement answering must not hide that the other one does not.
+  const { manager, gladys } = await makeSharedIpManager();
+  for (let poll = 0; poll < 3; poll += 1) {
+    await manager.pollLights();
+    assert.equal(gladys.fake.connectionStatus.connected, false);
+  }
+  assert.ok(manager.resyncTimer, 'the background resync keeps trying the dead one');
+  manager.stop();
+});
+
+test('a Hue scene is recalled on the bridge that holds it, not on another one at its address', async () => {
+  const { manager, clients } = await makeSharedIpManager();
+  clients.b1.down = false;
+  withScenes(clients.b2);
+  clients.b1.getGroups = async () => ({});
+  clients.b1.getScenes = async () => ({});
+  clients.b1.recallScene = async () => assert.fail('recalled on the wrong bridge');
+
+  await manager.activateScene({ scene: 'Détente' });
+  assert.deepEqual(clients.b2.recalled, [{ groupId: '1', sceneId: 's1' }]);
+  manager.stop();
+});
+
+test('a bridge whose switch to HTTPS failed is not forgotten on the first click', async () => {
+  // Firmware 1.78+ answers 403 itself; a refused certificate on HTTPS then
+  // leaves that 403 as the only answer.
+  const { manager, gladys, store, client } = await makeManager();
+  await createAll(manager, gladys);
+  failReads(client, { message: 'HTTP 403; HTTPS failed too', httpStatus: 403, httpsSwitchFailed: true });
+  await manager.pollLights();
+
+  const first = await manager.forgetUnreachableBridges();
+  assert.deepEqual([first.forgotten.length, first.busy.length], [0, 1]);
+  assert.equal(store.list().length, 1);
+  silentForLong(manager);
+  const second = await manager.forgetUnreachableBridges();
+  assert.equal(second.forgotten.length, 1);
+  manager.stop();
+});
+
+test('a bridge that only just went silent is kept when the wall clock jumps', async (t) => {
+  // A Raspberry Pi without RTC sets its clock by NTP after boot.
+  const { manager, gladys, client } = await makeManager();
+  await createAll(manager, gladys);
+  client.down = true;
+  await manager.pollLights();
+
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 24 * 3600 * 1000 });
+  const { forgotten } = await manager.forgetUnreachableBridges();
+  assert.deepEqual(forgotten, []);
+  manager.stop();
+});
+
+test('after a restart, Forget keeps the Discovery tab while a paired bridge has not answered yet', async (t) => {
+  // Its lights are not known yet: publishing now would drop them from the tab.
+  const { manager, gladys, store, clients } = await makeTwoBridgeManager();
+  clients['192.168.1.10'].down = true;
+  clients['192.168.1.20'].down = true;
+  await store.upsert({ id: 'b3', ip: '192.168.1.30', username: 'user-3' });
+  clients['192.168.1.30'] = makeFakeClient();
+  failReads(clients['192.168.1.30'], { message: 'unauthorized user', hueErrorType: 1 });
+  await manager.syncDevices();
+  const publish = t.mock.method(gladys, 'publishDiscoveredDevices');
+
+  const { forgotten } = await manager.forgetUnreachableBridges();
+  assert.deepEqual(
+    forgotten.map((bridge) => bridge.id),
+    ['b3'],
+  );
+  assert.equal(publish.mock.callCount(), 0);
   manager.stop();
 });
 

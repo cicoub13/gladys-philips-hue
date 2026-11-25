@@ -84,7 +84,10 @@ export function nextResyncDelay(attempt, random = Math.random()) {
  * @returns {boolean} True for a network-level failure.
  */
 function isUnreachable(error) {
-  return error.hueErrorType === undefined && error.httpStatus === undefined;
+  // A bridge that blocks HTTP and fails the switch to HTTPS (refused certificate,
+  // another bridge) answers its 403 itself: it cannot be used all the same, and
+  // must get the same grace as silence before Forget drops it.
+  return error.httpsSwitchFailed === true || (error.hueErrorType === undefined && error.httpStatus === undefined);
 }
 
 /**
@@ -97,6 +100,9 @@ function isUnreachable(error) {
  */
 function isGone(error) {
   const status = error.httpStatus;
+  if (error.httpsSwitchFailed) {
+    return false; // its 403 says HTTP is blocked, not that it is gone (see isUnreachable)
+  }
   return error.hueErrorType === HUE_UNAUTHORIZED_USER || (status !== undefined && status !== 429 && status < 500);
 }
 
@@ -127,12 +133,15 @@ export class HueManager {
      * }>}
      */
     this.registry = new Map();
-    /** @type {Set<string>} IPs of the paired bridges that did not answer last time. */
+    /**
+     * @type {Set<string>} The paired bridges whose last call failed, by `platformKeyOf`: not by
+     * address, two stored bridges may share one (a dead bridge and its replacement).
+     */
     this.unreachable = new Set();
     /**
-     * @type {Map<string, number>} Since when each bridge (by `platformKeyOf`, not by
-     * address: two stored bridges may share one) has been getting no answer at all.
-     * A 429/5xx answer marks a bridge unreachable during a scan, not silent.
+     * @type {Map<string, number>} Since when each bridge (by `platformKeyOf`) has been getting
+     * no answer at all, on the monotonic clock (`performance.now()`): an NTP step after boot must not
+     * make a bridge look silent for hours. A 429/5xx answer marks a bridge unreachable, not silent.
      */
     this.silentSince = new Map();
     /** Last status sent to Gladys, to only send changes. */
@@ -140,7 +149,7 @@ export class HueManager {
     this.resyncTimer = undefined;
     this.resyncAttempts = 0;
     this.refreshing = undefined;
-    this.lastRefreshAt = 0;
+    this.lastRefreshAt = -Infinity;
     this.stopped = false;
     // The light state refresh loop (startPolling / stopPolling).
     this.polling = false;
@@ -275,7 +284,7 @@ export class HueManager {
     if (answered) {
       this.silentSince.delete(key);
     } else if (!this.silentSince.has(key)) {
-      this.silentSince.set(key, Date.now());
+      this.silentSince.set(key, performance.now());
     }
   }
 
@@ -302,24 +311,27 @@ export class HueManager {
    * would break every command and refresh of its lights with a misleading "unknown
    * device" until the next successful scan.
    * @param {Map<object, Promise<object>>} [reads] - Reads of `getLights()` already made, by stored bridge.
-   * @returns {Promise<{ devices: Array<object>, reachable: number, unreachable: number }>} Scan result.
+   * @returns {Promise<{ devices: Array<object>, reachable: number, unreachable: number, unknown: number }>} Scan
+   * result. `unknown` counts the bridges that did not answer and whose lights are not known either (none read
+   * since the start).
    */
   async buildDiscoveredDevices(reads = new Map()) {
     const bridges = this.store.list();
     const nextRegistry = new Map();
     const devices = [];
     let unreachable = 0;
+    let unknown = 0;
 
     for (const bridge of bridges) {
       const client = this.clientFor(bridge);
       let lights;
       try {
         lights = await (reads.get(bridge) || client.getLights());
-        this.unreachable.delete(bridge.ip);
+        this.unreachable.delete(platformKeyOf(bridge));
         this.recordSilence(bridge, true);
       } catch (error) {
         unreachable += 1;
-        this.unreachable.add(bridge.ip);
+        this.unreachable.add(platformKeyOf(bridge));
         logger.warn(`Could not read lights from bridge ${bridge.ip}: ${error.message}`);
         this.recordSilence(bridge, !isUnreachable(error));
         if (isUnreachable(error)) {
@@ -327,11 +339,16 @@ export class HueManager {
         }
         // Carry over what we already knew about this bridge's lights, and keep
         // them in the Discovery tab.
+        let known = 0;
         for (const [deviceId, entry] of this.registry) {
           if (this.ownerOf(deviceId) === bridge) {
             nextRegistry.set(deviceId, entry);
             devices.push(lightToDevicePayload(this.gladys.externalIds(DEVICE_TYPE, entry.platformId), entry.light));
+            known += 1;
           }
+        }
+        if (known === 0) {
+          unknown += 1;
         }
         continue;
       }
@@ -355,15 +372,14 @@ export class HueManager {
       }
     }
 
-    // Against the store as it is NOW: a bridge forgotten, or re-paired at another
-    // address, while this scan was reading must not come back.
-    const stored = new Set(this.store.list().map((bridge) => bridge.ip));
-    for (const ip of this.unreachable) {
-      if (!stored.has(ip)) {
-        this.unreachable.delete(ip);
+    // Against the store as it is NOW: a bridge forgotten while this scan was
+    // reading must not come back.
+    const storedKeys = new Set(this.store.list().map(platformKeyOf));
+    for (const key of this.unreachable) {
+      if (!storedKeys.has(key)) {
+        this.unreachable.delete(key);
       }
     }
-    const storedKeys = new Set(this.store.list().map(platformKeyOf));
     for (const key of this.silentSince.keys()) {
       if (!storedKeys.has(key)) {
         this.silentSince.delete(key);
@@ -373,7 +389,7 @@ export class HueManager {
     const kept = devices.filter((device) => this.registry.has(device.external_id));
     const reachable = bridges.length - unreachable;
     logger.info(`Discovered ${kept.length} light(s) across ${reachable}/${bridges.length} reachable bridge(s)`);
-    return { devices: kept, reachable, unreachable };
+    return { devices: kept, reachable, unreachable, unknown };
   }
 
   /**
@@ -422,7 +438,7 @@ export class HueManager {
       return [];
     }
 
-    const { devices, reachable } = await this.buildDiscoveredDevices(reads);
+    const { devices, reachable, unknown } = await this.buildDiscoveredDevices(reads);
     // Nobody else would retry: without this, a bridge down at startup stayed
     // "unreachable" until the user clicked something.
     this.scheduleResync();
@@ -431,6 +447,14 @@ export class HueManager {
       // Publishing an empty list here would wipe the Discovery tab because of a
       // transient network glitch. Keep the previous list and say what is wrong.
       logger.warn('No bridge reachable, keeping the previously published devices');
+      await this.reportStatus(true);
+      return [];
+    }
+    if (force && unknown > 0) {
+      // After a Forget: a bridge still paired that has not answered since the
+      // start would lose its lights from the Discovery tab. The forgotten lights
+      // stay there instead, until the resync reaches that bridge.
+      logger.warn('A paired bridge has not answered since the start, keeping the previously published devices');
       await this.reportStatus(true);
       return [];
     }
@@ -487,9 +511,9 @@ export class HueManager {
       return;
     }
     if (reachable) {
-      this.unreachable.delete(bridge.ip);
+      this.unreachable.delete(platformKeyOf(bridge));
     } else {
-      this.unreachable.add(bridge.ip);
+      this.unreachable.add(platformKeyOf(bridge));
     }
     this.recordSilence(bridge, reachable);
     this.scheduleResync();
@@ -657,10 +681,10 @@ export class HueManager {
       return;
     }
     if (!this.refreshing) {
-      if (Date.now() - this.lastRefreshAt < REFRESH_MIN_INTERVAL_MS) {
+      if (performance.now() - this.lastRefreshAt < REFRESH_MIN_INTERVAL_MS) {
         return;
       }
-      this.lastRefreshAt = Date.now();
+      this.lastRefreshAt = performance.now();
       this.refreshing = this.syncDevices()
         .catch((error) => logger.warn(`Resync for ${device.external_id} failed: ${error.message}`))
         .finally(() => {
@@ -791,10 +815,12 @@ export class HueManager {
     const candidates = [];
     const failures = [];
     results.forEach((result, index) => {
-      const { ip } = bridges[index];
+      const bridge = bridges[index];
+      const { ip } = bridge;
       if (result.status === 'fulfilled') {
         const [groups, scenes] = result.value;
-        candidates.push(...listSceneCandidates(ip, groups, scenes));
+        // The bridge itself, not its address: two stored bridges may share one.
+        candidates.push(...listSceneCandidates(ip, groups, scenes).map((candidate) => ({ ...candidate, bridge })));
         return;
       }
       const { reason } = result;
@@ -813,14 +839,14 @@ export class HueManager {
       throw error;
     }
 
-    const bridge = bridges.find((b) => b.ip === match.bridgeIp);
+    const { bridge } = match;
     const client = this.clientFor(bridge);
     logger.info(`Recalling Hue scene "${match.sceneName}" (${match.roomName || 'all lights'}) on ${match.bridgeIp}`);
     await this.callBridge(bridge, () => client.recallScene(match.groupId, match.sceneId));
     // Like a command: a refresh already reading these lights must not undo it.
     this.commandSeq += 1;
-    for (const entry of this.registry.values()) {
-      if (entry.bridgeIp === match.bridgeIp && match.lights.includes(entry.hueId)) {
+    for (const [deviceId, entry] of this.registry) {
+      if (match.lights.includes(entry.hueId) && this.ownerOf(deviceId) === bridge) {
         entry.commandSeq = this.commandSeq;
       }
     }
@@ -1045,7 +1071,7 @@ export class HueManager {
       const bridge = bridges[index];
       const { reason } = result;
       const since = silentSince.get(platformKeyOf(bridge));
-      const longSilent = since !== undefined && Date.now() - since >= SILENT_FORGET_MS;
+      const longSilent = since !== undefined && performance.now() - since >= SILENT_FORGET_MS;
       if (result.status === 'rejected' && (isGone(reason) || (isUnreachable(reason) && longSilent))) {
         logger.info(`Forgetting bridge ${bridge.ip}: ${reason.message}`);
         forgotten.push(bridge);
@@ -1071,12 +1097,9 @@ export class HueManager {
         this.registry.delete(deviceId);
       }
     }
-    const storedIps = new Set(this.store.list().map((bridge) => bridge.ip));
     for (const bridge of forgotten) {
       this.silentSince.delete(platformKeyOf(bridge));
-      if (!storedIps.has(bridge.ip)) {
-        this.unreachable.delete(bridge.ip);
-      }
+      this.unreachable.delete(platformKeyOf(bridge));
     }
     // Stops the background resync when no unreachable bridge is left.
     this.scheduleResync();

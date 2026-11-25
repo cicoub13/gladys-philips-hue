@@ -9,6 +9,15 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
 - A Gladys scene acting on many lights at once no longer loses commands: the
   requests to a bridge are now spaced out, and retried a few times when the
   bridge says it is busy.
+- With two bridges at the same IP address (an old bridge and its replacement),
+  the connection status no longer flips between connected and unreachable, and
+  a Hue scene is recalled on the bridge that holds it.
+- **Forget unreachable bridges** no longer forgets, on the first click, a
+  bridge that blocks plain HTTP and could not be switched to HTTPS: like a
+  bridge that does not answer, it must have been failing for 5 minutes.
+- A clock set late after boot (a Raspberry Pi without a battery-backed clock)
+  no longer lets **Forget unreachable bridges** drop a bridge that has only just
+  stopped answering.
 
 ## [2.1.0] - 2026-11-24
 

@@ -93,21 +93,26 @@ certFingerprint?, platformKey? }], forgotten?: [{ id?, ip, platformKey? }] }` (`
 
 - Unreachable bridges keep their old registry entries, and their lights stay in the published list; if
   none is reachable, `syncDevices` does NOT publish (an empty list would wipe the Discovery tab), unless
-  `force` (after a Forget).
+  `force` (after a Forget). Even with `force`, it does not publish while a stored bridge that does not
+  answer has no known light (`unknown`: none read since the start), which would drop them from the tab.
 - Single background resync while a bridge is down: backoff 5 s → 5 min with jitter, `unref()`ed,
   cleared by `stop()`. Unknown device on command triggers a shared resync at most every 30 s.
 - Connection status is recomputed from `unreachable` and sent only when it changes.
-- Bridges are addressed by their stored `ip` (`unreachable` holds IPs); nothing re-discovers a moved
-  bridge automatically, re-pairing updates the ip (`upsert` keyed by id). Two stored bridges may share
-  an IP, so a light is attributed to its bridge by external_id (`ownerOf`: longest `platformKey || id ||
-ip` + `-` prefix), not by `entry.bridgeIp`; `callBridge`/`markBridge` take the bridge object.
+- Bridges are addressed by their stored `ip`, but tracked by `platformKeyOf(bridge)` (`unreachable`,
+  `silentSince`): two stored bridges may share an IP (a dead bridge and its replacement). Nothing
+  re-discovers a moved bridge automatically, re-pairing updates the ip (`upsert` keyed by id). A light
+  is attributed to its bridge by external_id (`ownerOf`: longest `platformKey || id || ip` + `-`
+  prefix), not by `entry.bridgeIp`; `callBridge`/`markBridge` take the bridge object, and so do the
+  scene candidates (`activateScene`).
 - A light with `state.reachable: false` on two reads in a row (cut at the wall; one read may be a
   mesh blip, `debounceUnreachable`) is published off, with the `unreachable` transport badge
   (`publishLightTransports`, created devices only, only on change, cache in `manager.transports`).
   `forgetUnreachableBridges()` (button `forget_bridges`) drops a stored bridge when its read gets an
   answer that `isGone()` (Hue error 1, any HTTP status but 429/5xx), or no answer after
-  `SILENT_FORGET_MS` (5 min) of none (`manager.silentSince`, keyed by `platformKeyOf`; a 429/5xx answer
-  only puts it in `unreachable`). The probe is recorded like any read (`markBridge`). Forget and the
+  `SILENT_FORGET_MS` (5 min) of none (`manager.silentSince`, keyed by `platformKeyOf`, on the monotonic
+  `performance.now()`: an NTP step must not age it; a 429/5xx answer only puts it in `unreachable`). A
+  failed switch to HTTPS (`error.httpsSwitchFailed`, set by `upgradeFailure`) counts as no answer,
+  not as gone, though it carries the bridge's 403. The probe is recorded like any read (`markBridge`). Forget and the
   store part of pairing share a lock (`manager.exclusive`), so no bridge is re-paired during the probe,
   and the resync after it reuses the probe reads (30 s action timeout). `store.remove()` keeps every forgotten bridge in `forgotten` (with the
   `platformKey` of IP-keyed ones); `upsert` matches it by id first, then an id-less one by IP. Results of calls to a bridge no longer

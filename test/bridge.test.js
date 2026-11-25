@@ -331,7 +331,10 @@ test('the switch refuses another bridge answering at the same address', async ()
   stubHttps(bridgeOverHttps({}, { cn: 'ecb5fafffe000000', bridgeid: 'ECB5FAFFFE000000' }));
   const { client, upgrades } = pairedOverHttp();
 
-  await assert.rejects(() => client.getLights(), /HTTPS failed too: Refused the TLS certificate/);
+  const error = await client.getLights().catch((caught) => caught);
+  assert.match(error.message, /HTTPS failed too: Refused the TLS certificate/);
+  // Flagged, so that Forget does not take the 403 as proof the bridge is gone.
+  assert.equal(error.httpsSwitchFailed, true);
   assert.deepEqual(upgrades, []);
 });
 
@@ -390,6 +393,7 @@ test('a bridge that answers neither HTTP nor HTTPS is reported unreachable', asy
   const error = await client.getLights().catch((caught) => caught);
   assert.match(error.message, /HTTP 403.*HTTPS failed too: connect ECONNREFUSED/);
   assert.equal(error.httpStatus, undefined);
+  assert.equal(error.httpsSwitchFailed, undefined);
 });
 
 test('an HTTP error other than "blocked" does not trigger the switch', async () => {
