@@ -570,10 +570,23 @@ async function makeLostBridgeManager() {
   return made;
 }
 
+// What identification returns for b1 at a new address, with its pinned certificate.
+const B1_MOVED = { id: 'b1', ip: '192.168.1.11', scheme: 'https', certFingerprint: 'AA:BB' };
+
+/**
+ * makeLostBridgeManager() with b1 paired over HTTPS, its certificate pinned.
+ * @returns {Promise<object>} Same as makeManager().
+ */
+async function makeLostHttpsBridgeManager() {
+  const made = await makeLostBridgeManager();
+  Object.assign(made.store.list()[0], { scheme: 'https', certFingerprint: 'aabb' });
+  return made;
+}
+
 test('a paired bridge found at a new address is followed there, with the same username', async () => {
   // A new DHCP lease: until now, only a new pairing (and the link button) fixed it.
-  const { manager, store } = await makeLostBridgeManager();
-  const moved = await manager.followMovedBridges([{ id: 'b1', ip: '192.168.1.11', scheme: 'http' }]);
+  const { manager, store } = await makeLostHttpsBridgeManager();
+  const moved = await manager.followMovedBridges([B1_MOVED]);
   assert.equal(moved.length, 1);
   assert.deepEqual(
     store.list().map((bridge) => [bridge.ip, bridge.username]),
@@ -584,12 +597,22 @@ test('a paired bridge found at a new address is followed there, with the same us
 
 test('a bridge whose old address now answers 404 (another device) is followed too', async () => {
   const { manager, gladys, store, client } = await makeManager();
+  Object.assign(store.list()[0], { scheme: 'https', certFingerprint: 'aabb' });
   await createAll(manager, gladys);
   failReads(client, { message: 'HTTP 404', httpStatus: 404 });
   await manager.pollLights();
   assert.ok(manager.resyncTimer, 'the background search runs');
-  await manager.followMovedBridges([{ id: 'b1', ip: '192.168.1.11', scheme: 'http' }]);
+  await manager.followMovedBridges([B1_MOVED]);
   assert.equal(store.list()[0].ip, '192.168.1.11');
+  manager.stop();
+});
+
+test('a bridge paired over plain HTTP is never followed: nothing proves who claims its id', async () => {
+  // The round bridge: anything on the network can announce its id, which is
+  // public, and would get its username in clear.
+  const { manager, store } = await makeLostBridgeManager();
+  await manager.followMovedBridges([{ id: 'b1', ip: '192.168.1.11', scheme: 'http' }]);
+  assert.equal(store.list()[0].ip, '192.168.1.10');
   manager.stop();
 });
 
@@ -617,6 +640,7 @@ test('a bridge is not followed to an address whose certificate is not the one pi
 
 test('the background resync finds a bridge that changed address, without the cloud', async () => {
   const { manager, gladys, store, client } = await makeLostBridgeManager();
+  Object.assign(store.list()[0], { scheme: 'https', certFingerprint: fingerprintOf(Buffer.from('cert')) });
   const silent = makeFakeClient();
   silent.down = true;
   client.down = false;
@@ -625,16 +649,16 @@ test('the background resync finds a bridge that changed address, without the clo
     mdns: [{ name: 'Philips Hue - 1._hue._tcp.local', addresses: ['192.168.1.11'], txt: ['bridgeid=B1'] }],
   };
   resetDiscoveryCache();
-  stubHttps(); // no HTTPS: identified over HTTP
-  const calls = serveHttp((url) => {
-    assert.ok(!url.includes('meethue'), 'never the cloud');
-    return { bridgeid: 'B1', modelid: 'BSB002' };
-  });
+  const { calls } = stubHttps(() => ({ body: { bridgeid: 'B1', modelid: 'BSB002' }, cn: 'b1' }));
+  serveHttp(() => assert.fail('never the cloud, nor plain HTTP'));
 
   await manager.resync();
   assert.equal(store.list()[0].ip, '192.168.1.11');
   assert.equal(gladys.fake.connectionStatus.connected, true);
-  assert.deepEqual(calls, ['GET http://192.168.1.11/api/config']);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ['https://192.168.1.11/api/config'],
+  );
   manager.stop();
   mock.restoreAll();
 });
@@ -746,6 +770,60 @@ test('a new bridge holding the lights of a bridge that no longer answers takes i
   );
   manager.stop();
   mock.restoreAll();
+});
+
+test('after a replacement, no command reaches the new bridge with the Hue ids of the old one', async () => {
+  // A migration renumbers the lights: /lights/3 was the kitchen on the old
+  // bridge, it is the bedroom on the new one.
+  const { manager, store } = await makeLostBridgeManager();
+  assert.ok(manager.registry.has(SALON_ID));
+  manager.identifiedBridges = async () => ({ bridges: [IDENTIFIED_BRIDGE], ignored: [] });
+  serveHttp((url, options) =>
+    options.method === 'POST' ? [{ success: { username: 'new-key' } }] : { 7: { uniqueid: '00:17:88:01:aa' } },
+  );
+  await manager.pairBridges();
+  mock.restoreAll();
+  assert.equal(store.list()[0].platformKey, 'b1');
+  assert.equal(manager.registry.has(SALON_ID), false, 'read again from the new bridge before any command');
+  manager.stop();
+});
+
+test('pairing again a forgotten bridge saved without an id is not announced as replacing itself', async () => {
+  const { manager, gladys, store, client } = await makeManager();
+  store.list()[0].id = undefined; // paired by 1.1.0 through the IP field
+  await createAll(manager, gladys);
+  client.down = true;
+  await manager.syncDevices();
+  silentForLong(manager);
+  await manager.forgetUnreachableBridges();
+  assert.deepEqual(store.forgotten, [{ ip: '192.168.1.10', platformKey: '192.168.1.10' }]);
+  manager.identifiedBridges = async () => ({
+    bridges: [{ ...IDENTIFIED_BRIDGE, id: 'b1', ip: '192.168.1.10' }],
+    ignored: [],
+  });
+  serveHttp((url, options) =>
+    options.method === 'POST' ? [{ success: { username: 'new-key' } }] : { 3: { uniqueid: '00:17:88:01:aa' } },
+  );
+  const result = await manager.pairBridges();
+  mock.restoreAll();
+  assert.deepEqual(result.replaced, []);
+  assert.equal(store.list()[0].platformKey, '192.168.1.10', 'its key back, through upsert');
+  manager.stop();
+});
+
+test('a paired bridge found at a new address gets no stored username when paired over plain HTTP', async () => {
+  const { manager, store } = await makeLostBridgeManager();
+  manager.identifiedBridges = async () => ({
+    bridges: [{ ...IDENTIFIED_BRIDGE, id: 'b1', ip: '192.168.1.11' }],
+    ignored: [],
+  });
+  const calls = serveHttp(() => [{ error: { type: 101, description: 'link button not pressed' } }]);
+  const result = await manager.pairBridges();
+  mock.restoreAll();
+  assert.deepEqual(calls, ['POST http://192.168.1.11/api'], 'the link button, not the stored username');
+  assert.equal(result.pending.length, 1);
+  assert.equal(store.list()[0].username, 'user-1');
+  manager.stop();
 });
 
 test('a new bridge holding the lights of a forgotten bridge takes its key back', async () => {
@@ -1204,6 +1282,43 @@ test('the stream of a forgotten bridge is closed, and every stream once disconne
   manager.stop();
 });
 
+test('the push budget counts the states really sent, not the unchanged ones', async (t) => {
+  // A dimming sends one state, not the four features of the light.
+  const { manager, client } = await makePushManager(t);
+  client.push([{ id: 'rid-3', on: { on: true }, type: 'light' }]);
+  await flush();
+  manager.pushedStates = [];
+  t.mock.timers.tick(1000);
+  await flush();
+  client.push([{ id: 'rid-3', dimming: { brightness: 40 }, type: 'light' }]);
+  await flush();
+  assert.equal(manager.pushedStates.length, 1);
+  manager.stop();
+});
+
+test('changes held back by the budget are dropped when the stream opens again, after newer values', async (t) => {
+  const { manager, gladys, client } = await makePushManager(t);
+  manager.pushedStates = Array.from({ length: 200 }, () => performance.now()); // budget spent
+  client.push([{ id: 'rid-3', dimming: { brightness: 50 }, type: 'light' }]);
+  await flush();
+  client.streams[0].response.destroy(); // dropped; 70 % set in the Hue app meanwhile
+  client.light.state = { ...client.light.state, on: true, bri: 178 };
+  await flush();
+  t.mock.timers.tick(1000); // reconnected
+  await flush();
+  manager.pushedStates = [];
+  t.mock.timers.tick(1000); // catch-up read, and the budget is back
+  await flush();
+  t.mock.timers.tick(1000);
+  await flush();
+  const brightness = gladys.fake.states
+    .filter((state) => state.device_feature_external_id === `${SALON_ID}:brightness`)
+    .map((state) => state.state);
+  assert.equal(brightness.at(-1), 70);
+  assert.ok(!brightness.includes(50), 'the held-back 50 % never overwrote it');
+  manager.stop();
+});
+
 test('a pushed change after a connectivity blip does not show the light cut', async (t) => {
   // Only a second report of its connectivity, or a read, confirms the cut: a
   // dimming shows the light still talks to the bridge.
@@ -1252,6 +1367,7 @@ test('a command the bridge applied is not reported failed when Gladys refuses it
 
 test('a command dropped by a busy queue neither marks the bridge unreachable nor reopens its stream', async (t) => {
   const { manager, gladys, client } = await makePushManager(t);
+  await manager.reportStatus(true);
   client.setLightState = async () => {
     throw Object.assign(new Error('Bridge 192.168.1.10 is busy: dropped after waiting 4100 ms'), {
       queueTimeout: true,
@@ -1261,6 +1377,25 @@ test('a command dropped by a busy queue neither marks the bridge unreachable nor
   assert.equal(gladys.fake.connectionStatus.connected, true);
   assert.equal(manager.unreachable.size, 0);
   assert.equal(client.streams[0].response.destroyed, false);
+  manager.stop();
+});
+
+test('a command dropped by the queue of a silent bridge leaves its silence alone', async () => {
+  // Unplugged: commands pile up behind requests that time out, and the ones
+  // dropped must not make it look connected, nor restart its silence.
+  const { manager, gladys, client } = await makeManager();
+  await createAll(manager, gladys);
+  client.down = true;
+  await manager.pollLights();
+  const since = manager.silentSince.get('b1');
+  client.setLightState = async () => {
+    throw Object.assign(new Error('Bridge 192.168.1.10 is busy: dropped after waiting 4000 ms'), {
+      queueTimeout: true,
+    });
+  };
+  await assert.rejects(() => manager.setValue({ external_id: SALON_ID }, { external_id: `${SALON_ID}:on-off` }, 1));
+  assert.equal(gladys.fake.connectionStatus.connected, false);
+  assert.equal(manager.silentSince.get('b1'), since);
   manager.stop();
 });
 

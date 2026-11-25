@@ -71,14 +71,20 @@ test('a failed request frees its slot and reaches its caller only', async () => 
   assert.equal(queue.inFlight, 0);
 });
 
-test('a request that waited too long for its turn is dropped, not sent late', async () => {
+test('a request that waited too long for its turn is dropped on time, never sent late', async () => {
+  // Every slot is held by a request to a bridge that stopped answering.
   const queue = new RequestQueue({ maxInFlight: 1, spacingMs: 0 });
   const log = [];
   const hung = deferred(log, 'hung');
   queue.run(hung.task);
-  const late = queue.run(deferred(log, 'late').task, { maxWaitMs: 50 });
-  await new Promise((resolve) => setTimeout(resolve, 60)); // the bridge does not answer for a while
+  const started = performance.now();
+  const late = assert.rejects(queue.run(deferred(log, 'late').task, { maxWaitMs: 50 }), (error) => {
+    assert.ok(performance.now() - started < 1000, 'rejected at its deadline, not when a slot frees up');
+    return error.queueTimeout === true;
+  });
+  await late;
   hung.finish();
-  await assert.rejects(late, (error) => error.queueTimeout === true);
+  await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(log, ['hung']);
+  assert.equal(queue.waiting.length, 0);
 });

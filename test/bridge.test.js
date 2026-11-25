@@ -138,9 +138,9 @@ test('a busy bridge is retried several times, each time later', async (t) => {
   });
   assert.deepEqual(await new HueBridgeClient('192.168.1.10', USERNAME).getLights(), { 3: { name: 'Salon' } });
   assert.equal(calls.length, 4);
-  // The pauses between attempts, without the queue spacing and the request timeouts.
+  // The pauses between attempts, not the queue spacing, the request timeouts or the queue deadlines.
   assert.deepEqual(
-    delays.filter((delay) => delay !== 100 && delay !== 8000),
+    delays.filter((delay) => [250, 500, 1000].includes(delay)),
     [250, 500, 1000],
   );
 });

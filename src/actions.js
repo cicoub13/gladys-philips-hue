@@ -92,12 +92,21 @@ export async function pairBridgeAction(manager) {
   if (paired.length > 0) {
     const names = paired.map((bridge) => describeBridge(bridge)).join(', ');
     const previous = replaced.map((replacement) => replacement.previous.ip).join(', ');
-    const replacedNote = previous
+    const replacedText = previous
       ? {
           en: ` It replaces the bridge ${previous}: the lights already created in Gladys keep working.`,
           fr: ` Il remplace le bridge ${previous} : les lampes déjà créées dans Gladys continuent de fonctionner.`,
         }
       : { en: '', fr: '' };
+    // A bridge already paired answers at once: another one may still wait for its button.
+    const waiting = pending.map((bridge) => describeBridge(bridge)).join(', ');
+    const pendingNote = waiting
+      ? {
+          en: ` Not paired, its link button was not pressed: ${waiting}. Press it, then click "Pair bridge" within 30 seconds.`,
+          fr: ` Non appairé, son bouton n'a pas été pressé : ${waiting}. Appuyez dessus, puis cliquez sur « Appairer le bridge » dans les 30 secondes.`,
+        }
+      : { en: '', fr: '' };
+    const replacedNote = { en: replacedText.en + pendingNote.en, fr: replacedText.fr + pendingNote.fr };
     // New credentials available: refresh the device list right away.
     await manager.syncDevices();
     if (manager.store.persistError) {

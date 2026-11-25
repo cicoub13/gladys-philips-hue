@@ -150,10 +150,16 @@ nouvelle adresse sans nouvel appairage ; **Découvrir les bridges** fait de mêm
 tout de suite. Si les lampes ne reviennent toujours pas, appuyez sur le bouton
 du bridge, puis recliquez sur **Appairer le bridge**. Vos lampes gardent leurs
 appareils dans Gladys. Fixez tout de même l'adresse du bridge dans votre box
-pour qu'elle ne change plus. Une exception : un bridge appairé avec la version
-1.1.0 ou antérieure via **Adresse IP du bridge**, que l'intégration n'a pas
-joint depuis sa mise à jour, n'est pas suivi et revient avec de nouveaux
-appareils.
+pour qu'elle ne change plus. Deux exceptions :
+
+- Un bridge encore appairé en HTTP simple (le bridge rond, ou un bridge carré
+  que l'intégration n'a pas encore passé en HTTPS) n'est pas suivi : rien ne
+  prouve que ce qui répond à la nouvelle adresse est bien votre bridge, et sa
+  clé y partirait en clair. Appairez-le à nouveau (bouton du bridge) : ses
+  lampes gardent leurs appareils.
+- Un bridge appairé avec la version 1.1.0 ou antérieure via **Adresse IP du
+  bridge**, que l'intégration n'a pas joint depuis sa mise à jour, n'est pas
+  suivi et revient avec de nouveaux appareils.
 
 **Les lampes ne répondent plus après une mise à jour du bridge** : depuis le
 firmware 1.78, le bridge refuse le HTTP simple. Un bridge appairé en HTTP passe

@@ -35,9 +35,10 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
   rid or `id_v1` → v1 hue id, zigbee_connectivity → `reachable` of every light of its device) →
   `queuePatches` (first at once, then merged, at most one batch per bridge per 1 s, `EVENT_THROTTLE_MS`;
   held back, still merged, while the pushes used their 200 states of the last minute, `pushBudget`, all
-  bridges together: Gladys takes 300) → `applyPatches` (cache, `commandSeq`, `debounceUnreachable` with
-  `reports` only for a patch carrying `reachable`, one `publishChangedStates` per batch, created lights
-  only, transports). The refresh
+  bridges together, counted from the `count` publishChangedStates returns: Gladys takes 300; dropped when
+  the stream opens again, since its catch-up read is newer) → `applyPatches` (cache, `commandSeq`,
+  `debounceUnreachable` with `reports` only for a patch carrying `reachable`, one `publishChangedStates`
+  per batch, created lights only, transports). The refresh
   loop keeps running beside the streams, as a safety net and for the round bridge.
 - `src/hue/`: `bridge.js` (REST client: v1, plus the v2 calls of the push), `queue.js` (per-bridge request
   pacing), `eventstream.js` (SSE + reconnection), `v2.js` (pure: v2 events → v1 state), `https.js` (`node:https` transport + TLS pinning),
@@ -63,9 +64,11 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
 - Every request of a stored bridge goes through its `RequestQueue` (`manager.queueOf(bridge)`, shared
   by all its clients): at most 3 in flight, one start per 100 ms (the bridge takes ~10 req/s). A request
   must be sent within 20 s of the `request()` call (4 s for `setLightState`), every attempt and pause
-  included: past that it is dropped with `queueTimeout` (or a retry is not made), never retried. Behind a
-  bridge that stopped answering, a command must not land after Gladys gave up on it. `queueTimeout` means
-  busy, not unreachable (`isUnreachable` is false for it). Forget and `confirmGone` probe with a queue of
+  included: past that it is dropped with `queueTimeout` (a timer per waiting job, so on time even when
+  every slot hangs; or a retry is not made), never retried. Behind a bridge that stopped answering, a
+  command must not land after Gladys gave up on it. `queueTimeout` carries no information on the bridge:
+  `callBridge` records nothing for it, `buildDiscoveredDevices` leaves its silence alone, and
+  `isUnreachable` is false for it. Forget and `confirmGone` probe with a queue of
   their own (`clientFor(bridge, { queue })`): requests stuck on a dead bridge would eat their timeout.
   `setValue` never fails on its echo (a Gladys 429): the bridge applied the command.
 - Retries: 1 retry after 400 ms for a request that got no answer; up to 3 for a busy answer (429/5xx),
@@ -90,7 +93,12 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
   `resetDiscoveryCache()` (`makeManager` does). Scans + cloud + identification must fit the 20 s of the actions.
 - Moved bridge (§4.7 of #48): `followMovedBridges(identified)` (under `exclusive`) gives a stored
   bridge with an id that is in `unreachable` the address identification found it at, same username.
-  Over HTTPS the found certificate must equal the pinned one (`keepsPin`: the bridge id is public).
+  Over HTTPS the found certificate must equal the pinned one (`keepsPin`: the bridge id is public); a
+  bridge paired over HTTP has no proof of identity, so its username only goes to its stored address: it
+  is never followed, and Pair at a new address goes through the link button. `replaceBridge` drops the
+  registry entries of the key it hands over (their Hue ids are the old bridge's) and lets the next
+  command resync at once (`lastRefreshAt`). The Pair message names the `pending` bridges even when
+  others were paired (an already-paired one answers with its stored username).
   Runs after every identification (`identifiedBridges`: Discover and Pair) and in `resync()`
   (`searchMovedBridges`, LAN only, at most once a minute, when a stored bridge with an id is in
   `unreachable`). `callBridge` puts in `unreachable` a bridge whose answer `isGone()` too (reset, another

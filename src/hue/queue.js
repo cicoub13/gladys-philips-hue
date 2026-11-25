@@ -37,7 +37,21 @@ export class RequestQueue {
    */
   run(task, { maxWaitMs = Infinity } = {}) {
     return new Promise((resolve, reject) => {
-      this.waiting.push({ task, resolve, reject, maxWaitMs, queuedAt: performance.now() });
+      const job = { task, resolve, reject };
+      if (Number.isFinite(maxWaitMs)) {
+        // Rejected on time, even while every slot is held by a request that hangs.
+        job.expiry = setTimeout(
+          () => {
+            this.waiting = this.waiting.filter((waiting) => waiting !== job);
+            const error = new Error(`dropped after waiting ${Math.round(maxWaitMs)} ms for the bridge`);
+            error.queueTimeout = true;
+            reject(error);
+          },
+          Math.max(0, maxWaitMs),
+        );
+        job.expiry.unref();
+      }
+      this.waiting.push(job);
       this.pump();
     });
   }
@@ -46,20 +60,11 @@ export class RequestQueue {
    * Start the next waiting task, if the limits allow it.
    */
   pump() {
-    let job;
-    while (!job && this.waiting.length > 0 && this.inFlight < this.maxInFlight && !this.cooling) {
-      job = this.waiting.shift();
-      const waited = performance.now() - job.queuedAt;
-      if (waited > job.maxWaitMs) {
-        const error = new Error(`dropped after waiting ${Math.round(waited)} ms for the bridge`);
-        error.queueTimeout = true;
-        job.reject(error);
-        job = undefined;
-      }
-    }
-    if (!job) {
+    if (this.waiting.length === 0 || this.inFlight >= this.maxInFlight || this.cooling) {
       return;
     }
+    const job = this.waiting.shift();
+    clearTimeout(job.expiry);
     const { task, resolve, reject } = job;
     this.inFlight += 1;
     this.cooling = true;

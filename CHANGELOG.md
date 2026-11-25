@@ -14,7 +14,8 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
 
 - A bridge that changed IP address is found again on its own, with no new
   pairing: the integration looks for it on your network in the background, and
-  **Discover bridges** follows it right away.
+  **Discover bridges** follows it right away. A bridge still paired over plain
+  HTTP, such as the round bridge, must be paired again.
 - After a migration to a Hue Bridge Pro, or a bridge replacement, **Pair bridge**
   recognizes the new bridge: the lights already created in Gladys keep working,
   with their rooms, scenes and history, instead of coming back as new devices.

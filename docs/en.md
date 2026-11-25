@@ -143,9 +143,16 @@ it to its new address with no new pairing; **Discover bridges** does the same
 right away. If the lights still do not come back, press the link button on the
 bridge, then click **Pair bridge** again. Your lights keep their devices in
 Gladys. Reserve the bridge address in your router all the same, so it does not
-change again. One exception: a bridge paired with version 1.1.0 or earlier
-through **Bridge IP address**, that the integration has not reached since you
-updated it, is not followed, and comes back with new devices.
+change again. Two exceptions:
+
+- A bridge still paired over plain HTTP (the round bridge, or a square bridge
+  the integration has not moved to HTTPS yet) is not followed: nothing proves
+  that what answers at the new address is your bridge, and its key would be
+  sent there in clear. Pair it again (link button): its lights keep their
+  devices.
+- A bridge paired with version 1.1.0 or earlier through **Bridge IP address**,
+  that the integration has not reached since you updated it, is not followed,
+  and comes back with new devices.
 
 **Lights stopped responding after a bridge firmware update**: since firmware
 1.78, the bridge refuses plain HTTP. A bridge paired over HTTP is switched to

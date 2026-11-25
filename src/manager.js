@@ -112,7 +112,8 @@ function isUnreachable(error) {
   if (error.httpsSwitchFailed) {
     return true;
   }
-  // Dropped by the queue (see ./hue/queue.js): the bridge is busy, like a 503.
+  // Dropped by the queue (see ./hue/queue.js): no information on the bridge,
+  // whose lights keep their badge (`callBridge` records nothing for it either).
   if (error.queueTimeout) {
     return false;
   }
@@ -148,14 +149,16 @@ function platformKeyOf(bridge) {
 /**
  * Whether a stored bridge's username may be sent to a bridge identification
  * just found: over HTTPS, its certificate must be the one pinned. The bridge id
- * it announces is public, and anything on the network can claim it.
- * @param {{ certFingerprint?: string }} stored - Stored bridge.
- * @param {{ scheme: string, certFingerprint?: string }} found - Identified bridge.
+ * it announces is public, and anything on the network can claim it. A bridge
+ * paired over plain HTTP has no proof of its identity: its username only goes
+ * to the address it already went to, so it is never followed to a new one.
+ * @param {{ ip: string, certFingerprint?: string }} stored - Stored bridge.
+ * @param {{ ip: string, scheme: string, certFingerprint?: string }} found - Identified bridge.
  * @returns {boolean} True when the username may be sent.
  */
 function keepsPin(stored, found) {
   if (!stored.certFingerprint) {
-    return true; // paired over HTTP: the username already went in clear
+    return found.ip === stored.ip;
   }
   return (
     found.scheme === 'https' &&
@@ -415,7 +418,10 @@ export class HueManager {
         unreachable += 1;
         this.unreachable.add(platformKeyOf(bridge));
         logger.warn(`Could not read lights from bridge ${bridge.ip}: ${error.message}`);
-        this.recordSilence(bridge, !isUnreachable(error));
+        if (!error.queueTimeout) {
+          // Dropped by the queue: says nothing of whether the bridge answers.
+          this.recordSilence(bridge, !isUnreachable(error));
+        }
         if (isUnreachable(error)) {
           await this.markLightsUnreachable(bridge);
         }
@@ -629,7 +635,11 @@ export class HueManager {
       await this.markBridge(bridge, true);
       return result;
     } catch (error) {
-      await this.markBridge(bridge, !isUnreachable(error) && !isGone(error), !isUnreachable(error));
+      // Dropped by the queue, behind requests that may hang: no information on
+      // the bridge, which keeps its status and its silence.
+      if (!error.queueTimeout) {
+        await this.markBridge(bridge, !isUnreachable(error) && !isGone(error), !isUnreachable(error));
+      }
       throw error;
     }
   }
@@ -793,8 +803,12 @@ export class HueManager {
         return opened;
       },
       onEvents: (events) => this.queuePatches(bridge, lightPatches(events, index)),
-      // Catch up with what changed while it was closed.
-      onOpen: () => this.refreshSoon(bridge, this.createdHueIdsOf(bridge)),
+      // Catch up with what changed while it was closed. Changes held back by the
+      // budget would land after that read, and overwrite newer values.
+      onOpen: () => {
+        this.pendingPatches.delete(bridge);
+        this.refreshSoon(bridge, this.createdHueIdsOf(bridge));
+      },
       onGiveUp: () => {
         this.withoutPush.set(bridge, tried);
         if (this.streams.get(bridge) && this.streams.get(bridge).stream === stream) {
@@ -943,12 +957,15 @@ export class HueManager {
         shown[entry.hueId] = light;
       }
     }
-    // One call for the whole batch, counted against the budget of the pushes.
+    // One call for the whole batch; what it really sent (unchanged values are
+    // skipped) counts against the budget of the pushes.
     const states = entries.flatMap((entry) => this.statesOf(entry, shown[entry.hueId]));
-    const now = performance.now();
-    states.forEach(() => this.pushedStates.push(now));
     try {
-      await this.gladys.publishChangedStates(states);
+      const { count = states.length } = (await this.gladys.publishChangedStates(states)) || {};
+      const now = performance.now();
+      for (let sent = 0; sent < count; sent += 1) {
+        this.pushedStates.push(now);
+      }
     } catch (error) {
       logger.warn(`Could not publish the states of the lights of bridge ${bridge.ip}: ${error.message}`);
     }
@@ -1616,6 +1633,15 @@ export class HueManager {
     // What the old bridge did (silent since hours, say) says nothing of the new one.
     this.unreachable.delete(key);
     this.silentSince.delete(key);
+    // Its Hue ids were those of the old bridge: kept, a command to the kitchen
+    // would reach whichever light has that id on the new one. The next sync
+    // reads them again, and a command arriving first triggers it at once.
+    for (const deviceId of [...this.registry.keys()]) {
+      if (deviceId.startsWith(this.gladys.externalIds(DEVICE_TYPE, `${key}-`).device)) {
+        this.registry.delete(deviceId);
+      }
+    }
+    this.lastRefreshAt = -Infinity;
     result.paired.push(bridge);
     result.replaced.push({ bridge, previous });
   }
@@ -1662,8 +1688,9 @@ export class HueManager {
     const uniqueids = new Set(Object.values(lights || {}).map((light) => light && light.uniqueid));
     const candidates = [
       ...this.store.list().filter((bridge) => this.unreachable.has(platformKeyOf(bridge))),
-      // Not itself: forgotten then paired again, `upsert` gives it its key back.
-      ...this.store.forgotten.filter((entry) => entry.id !== found.id),
+      // Not itself: forgotten then paired again, `upsert` gives it its key back
+      // (by id, or at its address for one saved without an id).
+      ...this.store.forgotten.filter((entry) => (entry.id ? entry.id !== found.id : entry.ip !== found.ip)),
     ];
     for (const previous of candidates) {
       const prefix = this.gladys.externalIds(DEVICE_TYPE, `${platformKeyOf(previous)}-`).device;
