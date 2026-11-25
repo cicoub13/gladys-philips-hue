@@ -17,10 +17,16 @@ Each Hue light is exposed as a Gladys device with the features it supports:
 | Color light             |   ✅   |     ✅     |  ✅   |                   |
 | Extended color light    |   ✅   |     ✅     |  ✅   |        ✅         |
 
-The integration reads your bridge at the interval you choose in **Refresh
-interval** (default: every minute): changes made outside Gladys — Hue app, wall
-switch, dimmer, Hue automations — show up in Gladys within that interval.
-Changes made from Gladys show up right away.
+Changes made outside Gladys — Hue app, wall switch, dimmer, Hue automations —
+show up in Gladys at once on a square bridge (firmware 1.48 or later) or a Hue
+Bridge Pro: the bridge pushes them to the integration. The integration also
+reads your bridge at the interval you choose in **Refresh interval** (default:
+every minute), as a safety net; on the round bridge, which pushes nothing,
+changes show up within that interval. Changes made from Gladys show up right
+away.
+
+To receive these changes, a bridge paired over plain HTTP is moved to HTTPS on
+its own, with no new pairing.
 
 A light powered off at the wall (its switch cut) shows as off in Gladys, with an
 **unreachable** badge on the Devices page, until it has power again.
@@ -68,21 +74,30 @@ running.
 ### Replacing a bridge
 
 After replacing your bridge or migrating to a Hue Bridge Pro, pair the new one
-(steps above), then click **Forget unreachable bridges**: the integration
-forgets every paired bridge that no longer answers, or no longer accepts the
+(steps above).
+
+The integration recognizes the new bridge as the replacement of the old one when
+the old one no longer works (or was forgotten) and the new one holds at least
+half of its lights created in Gladys. It then
+takes the old bridge's place: the lights already created keep working, with
+their rooms, scenes and history, and the message says which bridge it replaces.
+
+Otherwise, the lights of the new bridge appear as new devices in the
+**Discovery** tab. Click **Forget unreachable bridges**: the integration forgets
+every paired bridge that no longer answers, or no longer accepts the
 integration, so it stops reporting it unreachable. A bridge that still works is
 never forgotten, even a busy one, and neither is one that has only just stopped
-answering (it may be restarting): click again once it has been silent for 5 minutes. The lights of the new
-bridge appear as new devices in the **Discovery** tab; delete the old ones from
-the Devices page.
+answering (it may be restarting): click again once it has been silent for 5
+minutes. Then delete the old devices from the Devices page.
 
 ## How the bridge is found
 
-Three methods are tried, in order, and the first one that finds a bridge wins:
-
-1. **SSDP** on your local network, performed by Gladys on the integration's
-   behalf;
-2. **mDNS** (`_hue._tcp`), same mechanism;
+1. **mDNS** (`_hue._tcp`) on your local network, performed by Gladys on the
+   integration's behalf: the method Philips recommends, and the only one a Hue
+   Bridge Pro answers;
+2. **SSDP**, same mechanism, for the bridges whose mDNS does not reach Gladys.
+   The bridges both methods find are merged, so several bridges (a square bridge
+   and a Bridge Pro, say) are all found;
 3. Philips' **N-UPnP** endpoint (`discovery.meethue.com`) as a last resort. This
    one is a Philips _cloud_ service: it needs Internet access and only returns
    bridges seen from the same public IP address. It is only used when the two
@@ -122,13 +137,22 @@ Bridge**.
 missing. Press the round button on top of the bridge, then click **Pair bridge**
 again within the next 30 seconds.
 
-**Lights stopped responding**: the bridge may have changed IP address.
-**Discover bridges** does not update the address of a paired bridge: press the
-link button on the bridge, then click **Pair bridge** again. Your lights keep
-their devices in Gladys. Then reserve the bridge address in your router so it
-does not change again. One exception: a bridge paired with version 1.1.0 or
-earlier through **Bridge IP address**, that the integration has not reached
-since you updated it, comes back with new devices.
+**Lights stopped responding**: the bridge may have changed IP address. The
+integration looks for it on your local network in the background, and follows
+it to its new address with no new pairing; **Discover bridges** does the same
+right away. If the lights still do not come back, press the link button on the
+bridge, then click **Pair bridge** again. Your lights keep their devices in
+Gladys. Reserve the bridge address in your router all the same, so it does not
+change again. Two exceptions:
+
+- A bridge still paired over plain HTTP (the round bridge, or a square bridge
+  the integration has not moved to HTTPS yet) is not followed: nothing proves
+  that what answers at the new address is your bridge, and its key would be
+  sent there in clear. Pair it again (link button): its lights keep their
+  devices.
+- A bridge paired with version 1.1.0 or earlier through **Bridge IP address**,
+  that the integration has not reached since you updated it, is not followed,
+  and comes back with new devices.
 
 **Lights stopped responding after a bridge firmware update**: since firmware
 1.78, the bridge refuses plain HTTP. A bridge paired over HTTP is switched to

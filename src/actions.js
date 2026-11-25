@@ -87,22 +87,38 @@ export async function discoverBridgesAction(manager) {
  * @returns {Promise<{ en: string, fr: string }>} Message shown under the button.
  */
 export async function pairBridgeAction(manager) {
-  const { paired, pending, unreachable, notABridge } = await manager.pairBridges();
+  const { paired, pending, unreachable, notABridge, replaced = [] } = await manager.pairBridges();
 
   if (paired.length > 0) {
     const names = paired.map((bridge) => describeBridge(bridge)).join(', ');
+    const previous = replaced.map((replacement) => replacement.previous.ip).join(', ');
+    const replacedText = previous
+      ? {
+          en: ` It replaces the bridge ${previous}: the lights already created in Gladys keep working.`,
+          fr: ` Il remplace le bridge ${previous} : les lampes déjà créées dans Gladys continuent de fonctionner.`,
+        }
+      : { en: '', fr: '' };
+    // A bridge already paired answers at once: another one may still wait for its button.
+    const waiting = pending.map((bridge) => describeBridge(bridge)).join(', ');
+    const pendingNote = waiting
+      ? {
+          en: ` Not paired, its link button was not pressed: ${waiting}. Press it, then click "Pair bridge" within 30 seconds.`,
+          fr: ` Non appairé, son bouton n'a pas été pressé : ${waiting}. Appuyez dessus, puis cliquez sur « Appairer le bridge » dans les 30 secondes.`,
+        }
+      : { en: '', fr: '' };
+    const replacedNote = { en: replacedText.en + pendingNote.en, fr: replacedText.fr + pendingNote.fr };
     // New credentials available: refresh the device list right away.
     await manager.syncDevices();
     if (manager.store.persistError) {
       // The pairing worked, but the credentials could not be written to /data.
       return {
-        en: `Paired with: ${names}, and your lights are in the Discovery tab — but the credentials could NOT be saved (${manager.store.persistError.message}). They will be lost when the integration restarts. Check that the integration data volume is writable.`,
-        fr: `Appairage réussi avec : ${names}, vos lampes sont dans l'onglet Découverte — mais les identifiants n'ont PAS pu être enregistrés (${manager.store.persistError.message}). Ils seront perdus au redémarrage de l'intégration. Vérifiez que le volume de données de l'intégration est accessible en écriture.`,
+        en: `Paired with: ${names}, and your lights are in the Discovery tab — but the credentials could NOT be saved (${manager.store.persistError.message}). They will be lost when the integration restarts. Check that the integration data volume is writable.${replacedNote.en}`,
+        fr: `Appairage réussi avec : ${names}, vos lampes sont dans l'onglet Découverte — mais les identifiants n'ont PAS pu être enregistrés (${manager.store.persistError.message}). Ils seront perdus au redémarrage de l'intégration. Vérifiez que le volume de données de l'intégration est accessible en écriture.${replacedNote.fr}`,
       };
     }
     return {
-      en: `Paired successfully with: ${names}. Your lights are now available in the Discovery tab.`,
-      fr: `Appairage réussi avec : ${names}. Vos lampes sont maintenant disponibles dans l'onglet Découverte.`,
+      en: `Paired successfully with: ${names}. Your lights are now available in the Discovery tab.${replacedNote.en}`,
+      fr: `Appairage réussi avec : ${names}. Vos lampes sont maintenant disponibles dans l'onglet Découverte.${replacedNote.fr}`,
     };
   }
 

@@ -32,6 +32,11 @@ const DEFAULT_TIMEOUT_MS = 8000;
 // streaming megabytes at us.
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
+// The event stream stays silent while nothing changes: TCP keepalive probes it,
+// so that a bridge that rebooted (and forgot the connection) answers with a
+// reset instead of leaving us waiting forever.
+const STREAM_KEEPALIVE_MS = 30000;
+
 /**
  * Normalize a certificate fingerprint for comparison.
  * @param {string} fingerprint - Raw fingerprint.
@@ -243,6 +248,74 @@ export function requestJson(url, options = {}) {
     if (body !== undefined) {
       request.write(typeof body === 'string' ? body : JSON.stringify(body));
     }
+    request.end();
+  });
+}
+
+/**
+ * Open a long-lived HTTPS GET (the v2 event stream), with the same certificate
+ * check as `requestJson`: nothing, the headers with the key included, is
+ * written before the certificate passed.
+ * @param {string} url - Absolute `https://` URL.
+ * @param {{ headers?: object, timeoutMs?: number, pinnedFingerprint?: string, bridgeId?: string }} [options] -
+ * `timeoutMs` bounds the wait for the answer's headers only.
+ * @returns {Promise<{ response: import('node:http').IncomingMessage, close: () => void }>} The open stream,
+ * once the bridge answered 200. A refused certificate fails with `error.tlsRefused`, another status with
+ * `error.httpStatus`.
+ */
+export function openStream(url, options = {}) {
+  const { headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, pinnedFingerprint, bridgeId } = options;
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    let socket;
+    let request;
+    const close = () => {
+      request.destroy();
+      if (socket) {
+        socket.destroy();
+      }
+    };
+    const deadline = setTimeout(() => {
+      reject(new Error(`Bridge ${target.hostname} did not answer within ${timeoutMs} ms`));
+      close();
+    }, timeoutMs);
+    request = https.request(
+      target,
+      {
+        method: 'GET',
+        headers,
+        defaultPort: 443,
+        createConnection: verifiedConnection(
+          target,
+          { pinnedFingerprint, bridgeId },
+          (created) => {
+            socket = created;
+          },
+          () => {},
+        ),
+      },
+      (response) => {
+        clearTimeout(deadline);
+        if (response.statusCode !== 200) {
+          const error = new Error(
+            `Bridge ${target.hostname} returned HTTP ${response.statusCode} on ${target.pathname}`,
+          );
+          error.httpStatus = response.statusCode;
+          reject(error);
+          close();
+          return;
+        }
+        if (socket && typeof socket.setKeepAlive === 'function') {
+          socket.setKeepAlive(true, STREAM_KEEPALIVE_MS);
+        }
+        resolve({ response, close });
+      },
+    );
+    // Also after the answer (a reset): the caller watches the response for that.
+    request.on('error', (error) => {
+      clearTimeout(deadline);
+      reject(error);
+    });
     request.end();
   });
 }

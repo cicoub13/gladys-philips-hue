@@ -1,9 +1,11 @@
 // -----------------------------------------------------------------------------
-// Philips Hue bridge REST client (local network, v1 API).
+// Philips Hue bridge REST client (local network).
 //
-// We deliberately use the classic v1 API (`/api/...`):
+// Lights are read and commanded through the classic v1 API (`/api/...`):
 //   - it is available on every Hue bridge generation (v1 round, v2 square), and
 //   - it is more than enough to control lights.
+// From the v2 API (`/clip/v2/...`, HTTPS only), the client only opens the event
+// stream and reads what it takes to understand it (see `./v2.js`).
 //
 // New pairings use HTTPS whenever the bridge serves it, and plain HTTP otherwise
 // (BSB001). A bridge paired over HTTP keeps using it until its firmware blocks
@@ -23,18 +25,31 @@
 // -----------------------------------------------------------------------------
 
 import { createLogger } from '@gladysassistant/integration-sdk';
-import { requestJson } from './https.js';
+import { openStream, requestJson } from './https.js';
+import { RequestQueue } from './queue.js';
 
 const logger = createLogger({ name: 'hue-bridge' });
 
 const REQUEST_TIMEOUT_MS = 8000;
 
-// A bridge under load answers 429/503; a Wi-Fi hiccup rejects the fetch outright.
-// Both are worth one short retry — a lost command means a light that ignores the
-// user. Hue business errors are NEVER retried: they would fail identically.
+// A Wi-Fi hiccup rejects the fetch outright: worth one short retry, a lost
+// command means a light that ignores the user. Not more: a bridge that does not
+// answer costs a full timeout per attempt. Hue business errors are NEVER
+// retried: they would fail identically.
 const DEFAULT_RETRIES = 1;
 const RETRY_DELAY_MS = 400;
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+// A bridge under load answers 429/503 right away: retried a few times, each one
+// later than the last. Every attempt queues again behind the other requests to
+// the bridge (see ./queue.js), so a burst of commands spreads out instead of
+// failing, within the 5 s Gladys gives a command.
+const BUSY_RETRY_DELAYS_MS = [250, 500, 1000];
+
+// How long a request may wait for its turn in the bridge's queue (see
+// ./queue.js): a command, less than the 5 s Gladys waits for it.
+const MAX_QUEUE_WAIT_MS = 20000;
+const COMMAND_MAX_QUEUE_WAIT_MS = 4000;
 
 // Hue error type returned while the physical link button has NOT been pressed.
 export const HUE_LINK_BUTTON_NOT_PRESSED = 101;
@@ -77,7 +92,7 @@ export function isHttpBlocked(error) {
  * HTTPS failure (no answer, 429/5xx) is raised as such, so the request is
  * retried, and the bridge counted unreachable when nothing answered at all;
  * anything else (not the expected bridge, other status) keeps the
- * classification of the HTTP error.
+ * classification of the HTTP error, flagged `httpsSwitchFailed`.
  * @param {Error & { httpStatus?: number }} httpError - Why HTTP failed.
  * @param {Error & { httpStatus?: number, tlsRefused?: boolean, wrongBridge?: boolean }} httpsError - Why
  * HTTPS failed.
@@ -93,6 +108,11 @@ function upgradeFailure(httpError, httpsError) {
   if (status !== undefined) {
     error.httpStatus = status;
   }
+  if (!transient) {
+    // The bridge answered (its 403) but cannot be used: callers must not take
+    // that answer as proof that it is gone.
+    error.httpsSwitchFailed = true;
+  }
   return error;
 }
 
@@ -103,10 +123,11 @@ export class HueBridgeClient {
   /**
    * @param {string} ip - Bridge IP address on the local network.
    * @param {string} [username] - Bridge API username (a.k.a. application key).
-   * @param {{ scheme?: string, id?: string, certFingerprint?: string, timeoutMs?: number,
+   * @param {{ scheme?: string, id?: string, certFingerprint?: string, timeoutMs?: number, queue?: RequestQueue,
    *   onHttpsUpgrade?: (transport: { scheme: string, certFingerprint?: string }) => Promise<void> }} [options] -
    * Transport details resolved at identification time (see `./identify.js`) and persisted by the store.
-   * `onHttpsUpgrade` enables the switch to HTTPS of a bridge that blocks HTTP, and persists it.
+   * `onHttpsUpgrade` enables the switch to HTTPS of a bridge that blocks HTTP, and persists it. `queue` is
+   * shared by every client of the same bridge (see `./queue.js`).
    */
   constructor(ip, username, options = {}) {
     this.ip = ip;
@@ -121,6 +142,7 @@ export class HueBridgeClient {
     // it shortens this; normal traffic keeps the generous default.
     this.timeoutMs = options.timeoutMs || REQUEST_TIMEOUT_MS;
     this.onHttpsUpgrade = options.onHttpsUpgrade;
+    this.queue = options.queue || new RequestQueue();
   }
 
   /**
@@ -279,17 +301,26 @@ export class HueBridgeClient {
    * Perform an HTTP request to the bridge, retrying transient failures, and
    * surface the Hue errors hidden in HTTP 200 bodies as thrown errors.
    * @param {string} path - Path appended to `http://<ip>`.
-   * @param {object} [options] - Fetch options, plus `retries` (default 1).
+   * @param {object} [options] - Fetch options, plus `retries`: retries of a request that got no answer (default
+   * 1). `0` also disables the retries of a busy answer (429/5xx). `maxWaitMs`: the latest the request may be
+   * sent, from this call (20 s by default), all attempts and pauses included; beyond, it fails with
+   * `queueTimeout` set, or with the last error when no retry fits.
    * @returns {Promise<any>} Parsed JSON response, guaranteed error-free.
    * @throws {Error} With `.hueErrorType` set for a Hue business error.
    */
   async request(path, options = {}) {
-    const { retries = DEFAULT_RETRIES, ...fetchOptions } = options;
-    let lastError;
+    const { retries = DEFAULT_RETRIES, maxWaitMs = MAX_QUEUE_WAIT_MS, ...fetchOptions } = options;
+    // One deadline for every attempt: a retry must not reach the light after
+    // Gladys gave up on the command.
+    const sendBy = performance.now() + maxWaitMs;
+    let silentRetries = 0;
+    let busyRetries = 0;
 
-    for (let attempt = 0; attempt <= retries; attempt += 1) {
+    for (;;) {
       try {
-        const body = await this.fetchOnce(path, fetchOptions);
+        const body = await this.queue.run(() => this.fetchOnce(path, fetchOptions), {
+          maxWaitMs: sendBy - performance.now(),
+        });
         const hueError = findHueError(body);
         if (hueError) {
           // A business error: the bridge understood us and said no. Retrying
@@ -302,17 +333,28 @@ export class HueBridgeClient {
         }
         return body;
       } catch (error) {
-        const retryable = error.httpStatus === undefined || RETRYABLE_STATUS.has(error.httpStatus);
-        if (error.hueErrorType !== undefined || !retryable || attempt === retries) {
+        let delay;
+        if (error.queueTimeout) {
+          error.message = `Bridge ${this.ip} is busy: ${this.redact(path)} ${error.message}`;
+          throw error;
+        } else if (error.hueErrorType !== undefined) {
+          throw error;
+        } else if (error.httpStatus === undefined && silentRetries < retries) {
+          silentRetries += 1;
+          delay = RETRY_DELAY_MS;
+        } else if (RETRYABLE_STATUS.has(error.httpStatus) && retries > 0 && busyRetries < BUSY_RETRY_DELAYS_MS.length) {
+          delay = BUSY_RETRY_DELAYS_MS[busyRetries];
+          busyRetries += 1;
+        } else {
           throw error;
         }
-        lastError = error;
+        if (performance.now() + delay >= sendBy) {
+          throw error; // no time left for another attempt
+        }
         logger.debug(`Retrying ${this.redact(path)} on bridge ${this.ip}: ${error.message}`);
-        await sleep(RETRY_DELAY_MS);
+        await sleep(delay);
       }
     }
-
-    throw lastError;
   }
 
   /**
@@ -350,11 +392,12 @@ export class HueBridgeClient {
 
   /**
    * Fetch every light known by the bridge.
+   * @param {{ retries?: number }} [options] - Request options (see `request`).
    * @returns {Promise<Record<string, object>>} Lights indexed by bridge id.
    */
-  async getLights() {
+  async getLights(options = {}) {
     this.assertUsername();
-    return this.request(`/api/${this.username}/lights`);
+    return this.request(`/api/${this.username}/lights`, options);
   }
 
   /**
@@ -369,6 +412,7 @@ export class HueBridgeClient {
     return this.request(`/api/${this.username}/lights/${id}/state`, {
       method: 'PUT',
       body: JSON.stringify(state),
+      maxWaitMs: COMMAND_MAX_QUEUE_WAIT_MS,
     });
   }
 
@@ -403,6 +447,72 @@ export class HueBridgeClient {
     return this.request(`/api/${this.username}/groups/${groupId}/action`, {
       method: 'PUT',
       body: JSON.stringify({ scene: sceneId }),
+    });
+  }
+
+  /**
+   * Move a bridge paired over HTTP to HTTPS now, without waiting for its
+   * firmware to block HTTP: the v2 API, and its event stream, only exist over
+   * HTTPS. Same proof and persistence as the switch of a blocked bridge.
+   * @returns {Promise<void>} Resolves once the client talks HTTPS.
+   * @throws {Error} Why HTTPS failed: `code` `ECONNREFUSED` when the bridge has no HTTPS at all (round bridge),
+   * `tlsRefused` or `wrongBridge` when what answers is not this bridge.
+   */
+  async switchToHttps() {
+    if (this.scheme !== 'https') {
+      await this.probeHttps();
+    }
+  }
+
+  /**
+   * Whether the bridge serves the v2 API: it refuses `/clip/v2/resource`
+   * without a key (403), like aiohue's `is_v2_bridge` checks. The round bridge,
+   * and square bridges older than firmware 1.48, answer 404. HTTPS only.
+   * @returns {Promise<boolean>} True for a v2 bridge.
+   * @throws {Error} When the bridge did not answer, or was busy (429/5xx): the next attempt will tell.
+   */
+  async isV2() {
+    if (this.scheme !== 'https') {
+      return false;
+    }
+    try {
+      await this.queue.run(() => this.fetchWith('/clip/v2/resource', {}));
+      return false;
+    } catch (error) {
+      if (error.httpStatus === undefined || RETRYABLE_STATUS.has(error.httpStatus)) {
+        throw error;
+      }
+      return error.httpStatus === 403;
+    }
+  }
+
+  /**
+   * Read every v2 resource of a type (`light`, `zigbee_connectivity`…).
+   * @param {string} type - Resource type.
+   * @returns {Promise<Array<object>>} The resources.
+   */
+  async getResources(type) {
+    this.assertUsername();
+    const body = await this.queue.run(() =>
+      this.fetchWith(`/clip/v2/resource/${type}`, { headers: { 'hue-application-key': this.username } }),
+    );
+    return Array.isArray(body && body.data) ? body.data : [];
+  }
+
+  /**
+   * Open the v2 event stream. Not queued: it stays open.
+   * @returns {Promise<{ response: import('node:http').IncomingMessage, close: () => void }>} The open stream.
+   */
+  openEventStream() {
+    this.assertUsername();
+    if (this.scheme !== 'https') {
+      return Promise.reject(new Error(`Bridge ${this.ip} has no event stream over HTTP`));
+    }
+    return openStream(`https://${this.ip}/eventstream/clip/v2`, {
+      headers: { Accept: 'text/event-stream', 'hue-application-key': this.username },
+      timeoutMs: this.timeoutMs,
+      pinnedFingerprint: this.certFingerprint,
+      bridgeId: this.id,
     });
   }
 

@@ -1,6 +1,7 @@
 import { test, mock, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { HueBridgeClient, HUE_LINK_BUTTON_NOT_PRESSED, findHueError } from '../src/hue/bridge.js';
+import { RequestQueue } from '../src/hue/queue.js';
 import { stubHttps } from './fake-https.js';
 
 const USERNAME = 'super-secret-username';
@@ -118,6 +119,72 @@ test('a bridge overloaded with 503 is retried', async () => {
   const { calls } = mockFetch([{ ok: false, status: 503 }, { body: {} }]);
   await new HueBridgeClient('192.168.1.10', USERNAME).getLights();
   assert.equal(calls.length, 2);
+});
+
+test('a busy bridge is retried several times, each time later', async (t) => {
+  // A burst of commands (a scene on 15 lights) gets 429/503 for a moment: one
+  // retry 400 ms later used to lose the command.
+  const { calls } = mockFetch([
+    { ok: false, status: 429 },
+    { ok: false, status: 503 },
+    { ok: false, status: 503 },
+    { body: { 3: { name: 'Salon' } } },
+  ]);
+  const delays = [];
+  const setTimeoutOriginal = global.setTimeout;
+  t.mock.method(global, 'setTimeout', (callback, delay) => {
+    delays.push(delay);
+    return setTimeoutOriginal(callback, 0);
+  });
+  assert.deepEqual(await new HueBridgeClient('192.168.1.10', USERNAME).getLights(), { 3: { name: 'Salon' } });
+  assert.equal(calls.length, 4);
+  // The pauses between attempts, not the queue spacing, the request timeouts or the queue deadlines.
+  assert.deepEqual(
+    delays.filter((delay) => [250, 500, 1000].includes(delay)),
+    [250, 500, 1000],
+  );
+});
+
+test('a bridge that stays busy fails the request after the last retry', async (t) => {
+  const { calls } = mockFetch([{ ok: false, status: 503 }]);
+  const setTimeoutOriginal = global.setTimeout;
+  t.mock.method(global, 'setTimeout', (callback) => setTimeoutOriginal(callback, 0));
+  const client = new HueBridgeClient('192.168.1.10', USERNAME);
+  await assert.rejects(() => client.getLights(), /HTTP 503/);
+  assert.equal(calls.length, 4);
+});
+
+test('a command is never retried past its deadline, which covers every attempt', async () => {
+  // A 503 after a long wait in the queue: the retry used to get a full wait of
+  // its own, and reach the light seconds after Gladys reported a failure.
+  const { calls } = mockFetch([{ ok: false, status: 503 }]);
+  const client = new HueBridgeClient('192.168.1.10', USERNAME);
+  const sent = Date.now();
+  await assert.rejects(() => client.request('/api/x/lights/3/state', { method: 'PUT', maxWaitMs: 200 }), /HTTP 503/);
+  assert.equal(calls.length, 1, 'the first pause (250 ms) does not fit');
+  assert.ok(Date.now() - sent < 200);
+});
+
+test('a bridge that does not answer is retried once only: each attempt costs a full timeout', async () => {
+  const { calls } = mockFetch([{ throws: new Error('connect EHOSTUNREACH') }]);
+  await assert.rejects(() => new HueBridgeClient('192.168.1.10', USERNAME).getLights(), /EHOSTUNREACH/);
+  assert.equal(calls.length, 2);
+});
+
+test('the requests of a bridge share its queue', async () => {
+  let inFlight = 0;
+  let most = 0;
+  mock.method(global, 'fetch', async () => {
+    inFlight += 1;
+    most = Math.max(most, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    inFlight -= 1;
+    return { ok: true, status: 200, json: async () => [{ success: {} }] };
+  });
+  const queue = new RequestQueue({ spacingMs: 0 });
+  const clients = [1, 2, 3, 4, 5].map(() => new HueBridgeClient('192.168.1.10', USERNAME, { queue }));
+  await Promise.all(clients.map((client, index) => client.setLightState(String(index), { on: true })));
+  assert.equal(most, 3);
 });
 
 test('a business error is never retried', async () => {
@@ -275,7 +342,10 @@ test('the switch refuses another bridge answering at the same address', async ()
   stubHttps(bridgeOverHttps({}, { cn: 'ecb5fafffe000000', bridgeid: 'ECB5FAFFFE000000' }));
   const { client, upgrades } = pairedOverHttp();
 
-  await assert.rejects(() => client.getLights(), /HTTPS failed too: Refused the TLS certificate/);
+  const error = await client.getLights().catch((caught) => caught);
+  assert.match(error.message, /HTTPS failed too: Refused the TLS certificate/);
+  // Flagged, so that Forget does not take the 403 as proof the bridge is gone.
+  assert.equal(error.httpsSwitchFailed, true);
   assert.deepEqual(upgrades, []);
 });
 
@@ -334,6 +404,7 @@ test('a bridge that answers neither HTTP nor HTTPS is reported unreachable', asy
   const error = await client.getLights().catch((caught) => caught);
   assert.match(error.message, /HTTP 403.*HTTPS failed too: connect ECONNREFUSED/);
   assert.equal(error.httpStatus, undefined);
+  assert.equal(error.httpsSwitchFailed, undefined);
 });
 
 test('an HTTP error other than "blocked" does not trigger the switch', async () => {
@@ -351,4 +422,42 @@ test('a client without an upgrade hook never switches (identification)', async (
   const { calls } = stubHttps();
   await assert.rejects(() => new HueBridgeClient('192.168.1.10').getConfig({ retries: 0 }), /HTTP 403/);
   assert.equal(calls.length, 0);
+});
+
+test('isV2 tells a v2 bridge (403 without a key) from an older one', async () => {
+  const answers = { '192.168.1.10': 403, '192.168.1.11': 404, '192.168.1.13': 503 };
+  stubHttps((url) => {
+    const status = answers[new URL(url).hostname];
+    return status ? { status, body: {}, cn: BRIDGE_ID } : undefined;
+  });
+  const client = (ip) => new HueBridgeClient(ip, USERNAME, { scheme: 'https', id: BRIDGE_ID });
+  assert.equal(await client('192.168.1.10').isV2(), true);
+  assert.equal(await client('192.168.1.11').isV2(), false);
+  // Nothing answers: the next attempt will tell, not a definitive "no".
+  await assert.rejects(() => client('192.168.1.12').isV2(), /ECONNREFUSED/);
+  // Busy, rebooting after a firmware update: neither.
+  await assert.rejects(() => client('192.168.1.13').isV2(), /HTTP 503/);
+  // v2 only exists over HTTPS.
+  assert.equal(await new HueBridgeClient('192.168.1.10', USERNAME).isV2(), false);
+});
+
+test('getResources reads v2 resources with the key in a header, never in the path', async () => {
+  const { calls } = stubHttps(() => ({ body: { errors: [], data: [{ id: 'a', type: 'light' }] }, cn: BRIDGE_ID }));
+  const client = new HueBridgeClient('192.168.1.10', USERNAME, { scheme: 'https', id: BRIDGE_ID });
+  assert.deepEqual(await client.getResources('light'), [{ id: 'a', type: 'light' }]);
+  assert.equal(calls[0].url, 'https://192.168.1.10/clip/v2/resource/light');
+});
+
+test('a bridge paired over HTTP can be moved to HTTPS before its firmware blocks HTTP', async () => {
+  stubHttps(bridgeOverHttps({}));
+  const { client, upgrades } = pairedOverHttp();
+  await client.switchToHttps();
+  assert.equal(client.scheme, 'https');
+  assert.equal(upgrades.length, 1, 'persisted');
+  await client.switchToHttps();
+  assert.equal(upgrades.length, 1, 'once');
+});
+
+test('the event stream is never opened over plain HTTP', async () => {
+  await assert.rejects(() => new HueBridgeClient('192.168.1.10', USERNAME).openEventStream(), /over HTTP/);
 });

@@ -1,7 +1,13 @@
 import { test, mock, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createFakeGladys } from '@gladysassistant/integration-sdk/testing';
-import { discoverBridges, parseSsdpResults, parseMdnsResults, resetDiscoveryCache } from '../src/hue/discovery.js';
+import {
+  discoverBridges,
+  mergeBridges,
+  parseSsdpResults,
+  parseMdnsResults,
+  resetDiscoveryCache,
+} from '../src/hue/discovery.js';
 
 /**
  * One SSDP responder, as the Gladys core relays it: `headers` is the raw
@@ -162,20 +168,22 @@ test('discoverBridges finds the bridge on the LAN, without touching the cloud', 
   const gladys = createFakeGladys({ scanResults: { ssdp: [HUE_SSDP_RESPONSE] } });
 
   assert.deepEqual(await discoverBridges(gladys), [HUE_BRIDGE]);
-  assert.deepEqual(scanTypes(gladys), ['ssdp']);
   assert.equal(fetchMock.mock.callCount(), 0);
 });
 
-test('discoverBridges falls back to mDNS when SSDP finds no Hue bridge', async () => {
-  const fetchMock = mock.method(global, 'fetch', async () => {
-    throw new Error('the cloud must not be called');
-  });
-  const printer = ssdpResponder(['LOCATION: http://192.168.1.5:631/desc.xml'], { source_ip: '192.168.1.5' });
-  const gladys = createFakeGladys({ scanResults: { ssdp: [printer], mdns: [HUE_MDNS_SERVICE] } });
+test('discoverBridges runs mDNS first, then SSDP, and merges them by bridge id', async () => {
+  // A BSB002 answers both, a Bridge Pro only mDNS: stopping at the first method
+  // that found something used to miss the Pro.
+  const pro = {
+    ...HUE_MDNS_SERVICE,
+    name: 'Hue Bridge Pro - 0A1B2C._hue._tcp.local',
+    addresses: ['192.168.1.43'],
+    txt: ['bridgeid=c42996fffe0a1b2c', 'modelid=BSB003'],
+  };
+  const gladys = createFakeGladys({ scanResults: { ssdp: [HUE_SSDP_RESPONSE], mdns: [HUE_MDNS_SERVICE, pro] } });
 
-  assert.deepEqual(await discoverBridges(gladys), [HUE_BRIDGE]);
-  assert.equal(fetchMock.mock.callCount(), 0);
-  assert.deepEqual(scanTypes(gladys), ['ssdp', 'mdns']);
+  assert.deepEqual(await discoverBridges(gladys), [HUE_BRIDGE, { id: 'c42996fffe0a1b2c', ip: '192.168.1.43' }]);
+  assert.deepEqual(scanTypes(gladys), ['mdns', 'ssdp']);
 });
 
 test('discoverBridges falls back to the cloud endpoint as a last resort', async () => {
@@ -187,7 +195,31 @@ test('discoverBridges falls back to the cloud endpoint as a last resort', async 
   const gladys = createFakeGladys({ scanResults: { ssdp: [], mdns: [] } });
 
   assert.deepEqual(await discoverBridges(gladys), [{ id: 'cloud1', ip: '192.168.1.99' }]);
-  assert.deepEqual(scanTypes(gladys), ['ssdp', 'mdns']);
+  assert.deepEqual(scanTypes(gladys), ['mdns', 'ssdp']);
+});
+
+test('a background discovery never asks the cloud', async () => {
+  const fetchMock = mock.method(global, 'fetch', async () => {
+    throw new Error('the cloud must not be called');
+  });
+  assert.deepEqual(await discoverBridges(createFakeGladys(), { cloud: false }), []);
+  assert.equal(fetchMock.mock.callCount(), 0);
+});
+
+test('mergeBridges keeps one entry per bridge, the first found', () => {
+  assert.deepEqual(
+    mergeBridges([
+      { id: 'a', ip: '192.168.1.42' },
+      { id: 'a', ip: '192.168.1.99' },
+      { id: '', ip: '192.168.1.42' }, // the same bridge, its mDNS record without TXT
+      { id: '', ip: '192.168.1.50' },
+      { id: '', ip: '192.168.1.50' },
+    ]),
+    [
+      { id: 'a', ip: '192.168.1.42' },
+      { id: '', ip: '192.168.1.50' },
+    ],
+  );
 });
 
 test('a failing scan does not break discovery, it moves on', async (t) => {
@@ -198,7 +230,7 @@ test('a failing scan does not break discovery, it moves on', async (t) => {
   }));
   const gladys = createFakeGladys();
   const scanNetwork = t.mock.method(gladys, 'scanNetwork', async (type) => {
-    throw new Error(type === 'ssdp' ? '429 too many scans' : 'mdns unavailable');
+    throw new Error(type === 'mdns' ? 'mdns unavailable' : '409 a scan is already running');
   });
 
   assert.deepEqual(await discoverBridges(gladys), [{ id: 'cloud1', ip: '192.168.1.99' }]);
@@ -217,13 +249,12 @@ test('discoverBridges works without an SDK instance', async () => {
   assert.deepEqual(await discoverBridges(undefined), []);
 });
 
-test('a second discovery within the rate-limit window reuses the first result', async () => {
-  // The core allows one mediated scan every 10 s: clicking "Discover bridges"
-  // then "Pair bridge" must not earn the user a 429.
+test('a second discovery within a few seconds reuses the first result', async () => {
+  // Clicking "Discover bridges" then "Pair bridge" must not wait for two more scans.
   const gladys = createFakeGladys({ scanResults: { ssdp: [HUE_SSDP_RESPONSE] } });
   await discoverBridges(gladys);
   await discoverBridges(gladys);
-  assert.deepEqual(scanTypes(gladys), ['ssdp'], 'the network was scanned only once');
+  assert.deepEqual(scanTypes(gladys), ['mdns', 'ssdp'], 'the network was scanned only once');
 });
 
 test('an N-UPnP HTTP error is swallowed', async () => {
@@ -234,4 +265,30 @@ test('an N-UPnP HTTP error is swallowed', async () => {
 test('an unexpected N-UPnP body shape is swallowed', async () => {
   mock.method(global, 'fetch', async () => ({ ok: true, status: 200, json: async () => ({ error: 'nope' }) }));
   assert.deepEqual(await discoverBridges(createFakeGladys()), []);
+});
+
+test('a discovery started during another one waits for it and takes its result', async () => {
+  // The core runs one scan per integration at a time: a click on "Discover
+  // bridges" during a background search used to get two refusals and nothing.
+  const gladys = createFakeGladys({ scanResults: { mdns: [HUE_MDNS_SERVICE] } });
+  const [background, clicked] = await Promise.all([discoverBridges(gladys, { cloud: false }), discoverBridges(gladys)]);
+  assert.deepEqual(background, [HUE_BRIDGE]);
+  assert.deepEqual(clicked, [HUE_BRIDGE]);
+  assert.deepEqual(scanTypes(gladys), ['mdns', 'ssdp']);
+});
+
+test('a failed scan is not reused: the next discovery scans again', async (t) => {
+  mock.method(global, 'fetch', async () => ({ ok: true, status: 200, json: async () => [] }));
+  const gladys = createFakeGladys({ scanResults: { mdns: [HUE_MDNS_SERVICE] } });
+  const scanNetwork = gladys.scanNetwork.bind(gladys);
+  let refused = true;
+  t.mock.method(gladys, 'scanNetwork', async (type, options) => {
+    if (refused) {
+      throw new Error('409 a scan is already running');
+    }
+    return scanNetwork(type, options);
+  });
+  assert.deepEqual(await discoverBridges(gladys), []);
+  refused = false;
+  assert.deepEqual(await discoverBridges(gladys), [HUE_BRIDGE]);
 });

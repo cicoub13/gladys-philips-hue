@@ -112,6 +112,36 @@ test('pairBridge confirms a successful pairing and refreshes the devices', async
   assert.equal(manager.synced, 1, 'the lights are published right away');
 });
 
+test('pairBridge still asks for the link button of a new bridge when another one was already paired', async () => {
+  // Bridge A answers with its stored username: B, whose button was not pressed,
+  // must not be hidden behind a success message.
+  const other = { ...HUE_BRIDGE, ip: '192.168.1.43', name: 'Hue Bridge Pro' };
+  const message = await pairBridgeAction(
+    makeManager({
+      pairResult: { paired: [HUE_BRIDGE], pending: [other], unreachable: [], notABridge: [], replaced: [] },
+    }),
+  );
+  assertBilingual(message);
+  assert.match(message.en, /link button was not pressed: Hue Bridge Pro \(BSB002\) — 192\.168\.1\.43/);
+  assert.match(message.fr, /bouton n'a pas été pressé : Hue Bridge Pro/);
+});
+
+test('pairBridge says which bridge the new one replaces, and that the devices keep working', async () => {
+  const manager = makeManager({
+    pairResult: {
+      paired: [HUE_BRIDGE],
+      pending: [],
+      unreachable: [],
+      notABridge: [],
+      replaced: [{ bridge: HUE_BRIDGE, previous: { id: 'old', ip: '192.168.1.10' } }],
+    },
+  });
+  const message = await pairBridgeAction(manager);
+  assertBilingual(message);
+  assert.match(message.en, /replaces the bridge 192\.168\.1\.10: the lights already created in Gladys keep working/);
+  assert.match(message.fr, /remplace le bridge 192\.168\.1\.10/);
+});
+
 test('pairBridge warns when the credentials could not be saved', async () => {
   // Reporting a plain success would be a lie: the pairing is lost on restart.
   const manager = makeManager({

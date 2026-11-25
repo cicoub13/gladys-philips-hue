@@ -10,15 +10,20 @@ locally via its HTTP API — no Hue cloud account required.
 
 ## Features
 
-- Auto-discovers Hue bridges locally (SSDP then mDNS, through the Gladys
+- Auto-discovers Hue bridges locally (mDNS and SSDP merged, through the Gladys
   mediated `network_discovery`), with the Philips N-UPnP cloud endpoint and a
-  manual IP as fallbacks.
+  manual IP as fallbacks. Follows a bridge that changed IP address, and
+  recognizes a replaced or migrated bridge (Hue Bridge Pro) so that the devices
+  keep working.
 - Press-the-link-button pairing, from a button in the Configuration screen.
 - Exposes each light with the features it supports: **on/off**, **brightness**,
   **color** (RGB ⇄ Hue xy), **white temperature** (mireds).
-- Refreshes light states on its own timer at a configurable interval (one
-  request per bridge, so changes made in the Hue app or by a wall switch show
-  up in Gladys), publishing only the values that actually changed.
+- Receives the changes made in the Hue app or by a dimmer at once, through the
+  v2 event stream of square bridges and the Bridge Pro, and refreshes light
+  states on its own timer at a configurable interval as a safety net (one
+  request per bridge), publishing only the values that actually changed.
+- Paces its requests to each bridge (at most 3 at once, 10 per second), so a
+  scene acting on many lights loses no command.
 - Recalls the scenes of the Hue app from Gladys scenes (`activate_scene` scene
   action, Gladys 5.1+), found by name and optional room.
 

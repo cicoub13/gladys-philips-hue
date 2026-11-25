@@ -1,20 +1,24 @@
 // -----------------------------------------------------------------------------
 // Bridge discovery, local first.
 //
-// Three methods are tried in order, and the first one that finds something wins:
-//
-//   1. SSDP  — the Gladys core runs in network=host and performs the M-SEARCH on
-//              our behalf (manifest `network_discovery`), which is the only way
-//              to reach the LAN from our isolated container. A Hue bridge
-//              answers with a `hue-bridgeid` header.
-//   2. mDNS  — same mediated mechanism, browsing the `_hue._tcp` service.
+//   1. mDNS  — the Gladys core runs in network=host and browses the `_hue._tcp`
+//              service on our behalf (manifest `network_discovery`), which is
+//              the only way to reach the LAN from our isolated container. The
+//              method Signify recommends, and the only one the Bridge Pro
+//              answers.
+//   2. SSDP  — same mediated mechanism, an M-SEARCH: a Hue bridge answers with a
+//              `hue-bridgeid` header. Deprecated by Signify, kept for the
+//              bridges whose mDNS does not reach Gladys.
 //   3. N-UPnP— Philips' https://discovery.meethue.com/ endpoint. It is a CLOUD
 //              service: it needs Internet access and only returns bridges seen
-//              from the same public IP. Kept as a last resort because it still
+//              from the same public IP. Only when the LAN found nothing: it still
 //              rescues setups where multicast is filtered.
 //
-// Every step is best-effort: a failure moves on to the next one and an empty
-// result is a valid answer (the user can always type the IP manually).
+// mDNS and SSDP both run, one after the other (the core runs one scan per
+// integration at a time), and their results are merged by bridge id: with a
+// BSB002 and a Bridge Pro, SSDP alone only finds the BSB002. Every step is
+// best-effort: a failure moves on and an empty result is a valid answer (the
+// user can always type the IP manually).
 //
 // Docs: https://developers.meethue.com/develop/get-started-2/ (discovery)
 // -----------------------------------------------------------------------------
@@ -24,15 +28,23 @@ import { createLogger, parseMdnsTxt } from '@gladysassistant/integration-sdk';
 const logger = createLogger({ name: 'hue-discovery' });
 
 const NUPNP_URL = 'https://discovery.meethue.com/';
-const DISCOVERY_TIMEOUT_MS = 8000;
-const SCAN_TIMEOUT_SECONDS = 5;
+// Two scans, then the cloud, then the identification of what they found must
+// fit in the 20 s of the "Discover bridges" and "Pair bridge" actions. A bridge
+// answers an mDNS query or an M-SEARCH within a second.
+const DISCOVERY_TIMEOUT_MS = 5000;
+const SCAN_TIMEOUT_SECONDS = 3;
 
-// The core allows one mediated scan every 10 seconds per integration. Both the
-// "Discover bridges" button and the pairing flow discover, and a user clicking
-// them in a row would hit a 429 — so a fresh result is reused for a short while.
+// Both the "Discover bridges" button and the pairing flow discover, and so does
+// the background search for a bridge that changed address: a fresh result of
+// the LAN scans is reused for a short while, instead of scanning again.
 const SCAN_CACHE_MS = 10000;
 
-let scanCache = { at: 0, bridges: [] };
+let scanCache = { at: -Infinity, bridges: [] };
+
+// The LAN scans in progress, shared: the core runs one scan per integration at a
+// time and refuses a second one, so a click on "Discover bridges" during a
+// background search waits for it and takes its result.
+let scanning;
 
 /**
  * Parse the raw text of an SSDP response (`HTTP/1.1 200 OK` then `Name: value`
@@ -129,7 +141,8 @@ export function parseMdnsResults(services) {
  * @param {object} gladys - The GladysIntegration SDK instance.
  * @param {string} type - Scan type (`ssdp` or `mdns`).
  * @param {Function} parse - Parser turning the raw results into bridges.
- * @returns {Promise<Array<{ id: string, ip: string }>>} Discovered bridges.
+ * @returns {Promise<Array<{ id: string, ip: string }> | undefined>} Discovered bridges, `undefined` when the
+ * scan failed.
  */
 async function mediatedScan(gladys, type, parse) {
   if (!gladys || typeof gladys.scanNetwork !== 'function') {
@@ -142,8 +155,24 @@ async function mediatedScan(gladys, type, parse) {
     return bridges;
   } catch (error) {
     logger.warn(`${type.toUpperCase()} discovery failed: ${error.message}`);
-    return [];
+    return undefined;
   }
+}
+
+/**
+ * Scan the LAN: mDNS then SSDP, merged. The result is reused for a few
+ * seconds, unless a scan failed.
+ * @param {object} [gladys] - SDK instance.
+ * @returns {Promise<Array<{ id: string, ip: string }>>} Discovered bridges.
+ */
+async function scanLan(gladys) {
+  const mdns = await mediatedScan(gladys, 'mdns', parseMdnsResults);
+  const ssdp = await mediatedScan(gladys, 'ssdp', parseSsdpResults);
+  const bridges = mergeBridges([...(mdns || []), ...(ssdp || [])]);
+  if (mdns && ssdp) {
+    scanCache = { at: performance.now(), bridges };
+  }
+  return bridges;
 }
 
 /**
@@ -174,26 +203,52 @@ async function discoverViaNupnp() {
 }
 
 /**
- * Discover the Hue bridges reachable on the network: SSDP, then mDNS, then the
- * Philips cloud endpoint as a last resort.
+ * Merge the bridges found by several methods, by bridge id: the first one found
+ * wins. A bridge found without an id (an mDNS record without TXT) is dropped
+ * when another result gives the id of its address.
+ * @param {Array<{ id: string, ip: string }>} found - Bridges, in order of preference.
+ * @returns {Array<{ id: string, ip: string }>} One entry per bridge.
+ */
+export function mergeBridges(found) {
+  const byId = new Map();
+  for (const bridge of found) {
+    if (bridge.id && !byId.has(bridge.id)) {
+      byId.set(bridge.id, bridge);
+    }
+  }
+  const identifiedIps = new Set([...byId.values()].map((bridge) => bridge.ip));
+  const byIp = new Map();
+  for (const bridge of found) {
+    if (!bridge.id && !identifiedIps.has(bridge.ip) && !byIp.has(bridge.ip)) {
+      byIp.set(bridge.ip, bridge);
+    }
+  }
+  return [...byId.values(), ...byIp.values()];
+}
+
+/**
+ * Discover the Hue bridges reachable on the network: mDNS and SSDP merged, then
+ * the Philips cloud endpoint as a last resort.
  * @param {object} [gladys] - SDK instance, required for the mediated LAN scans.
+ * @param {{ cloud?: boolean }} [options] - `cloud: false` never asks the cloud (background searches).
  * @returns {Promise<Array<{ id: string, ip: string }>>} Discovered bridges.
  */
-export async function discoverBridges(gladys) {
-  if (Date.now() - scanCache.at < SCAN_CACHE_MS) {
+export async function discoverBridges(gladys, { cloud = true } = {}) {
+  let bridges;
+  if (performance.now() - scanCache.at < SCAN_CACHE_MS) {
     logger.debug('Reusing the bridges discovered a few seconds ago');
-    return scanCache.bridges;
+    bridges = scanCache.bridges;
+  } else {
+    if (!scanning) {
+      scanning = scanLan(gladys).finally(() => {
+        scanning = undefined;
+      });
+    }
+    bridges = await scanning;
   }
-
-  let bridges = await mediatedScan(gladys, 'ssdp', parseSsdpResults);
-  if (bridges.length === 0) {
-    bridges = await mediatedScan(gladys, 'mdns', parseMdnsResults);
+  if (bridges.length === 0 && cloud) {
+    return discoverViaNupnp();
   }
-  if (bridges.length === 0) {
-    bridges = await discoverViaNupnp();
-  }
-
-  scanCache = { at: Date.now(), bridges };
   return bridges;
 }
 
@@ -202,5 +257,6 @@ export async function discoverBridges(gladys) {
  * @returns {void}
  */
 export function resetDiscoveryCache() {
-  scanCache = { at: 0, bridges: [] };
+  scanCache = { at: -Infinity, bridges: [] };
+  scanning = undefined;
 }

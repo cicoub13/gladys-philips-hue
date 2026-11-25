@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import tls from 'node:tls';
-import { checkCertificate, fingerprintOf, normalizeFingerprint, requestJson } from '../src/hue/https.js';
+import { checkCertificate, fingerprintOf, normalizeFingerprint, openStream, requestJson } from '../src/hue/https.js';
 
 const BRIDGE_ID = '001788fffe123456';
 
@@ -165,6 +165,69 @@ test('nothing is written to a peer whose certificate is refused', async (t) => {
     );
     assert.equal(error.tlsRefused, true);
     assert.deepEqual(received, []);
+  } finally {
+    server.close();
+  }
+});
+
+test('openStream hands over the open event stream of a bridge', async (t) => {
+  t.after(() => mock.restoreAll());
+  const headers = [];
+  const server = await serve((request, response) => {
+    headers.push(request.headers);
+    response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    response.write(': hi\n\n');
+  });
+  tlsTo(server.url, BRIDGE_ID);
+  try {
+    const { response, close } = await openStream('https://127.0.0.1/eventstream/clip/v2', {
+      headers: { 'hue-application-key': 'secret' },
+      bridgeId: BRIDGE_ID,
+    });
+    response.setEncoding('utf8');
+    const [chunk] = await new Promise((resolve) => response.once('data', (...args) => resolve(args)));
+    assert.equal(chunk, ': hi\n\n');
+    assert.equal(headers[0]['hue-application-key'], 'secret');
+    const closed = new Promise((resolve) => response.once('close', resolve));
+    close();
+    await closed;
+  } finally {
+    server.close();
+  }
+});
+
+test('openStream sends nothing, not even the key, to a peer whose certificate is refused', async (t) => {
+  t.after(() => mock.restoreAll());
+  const received = [];
+  const server = await serve((request, response) => {
+    received.push(request.url);
+    response.end();
+  });
+  tlsTo(server.url, 'impostor');
+  try {
+    const error = await openStream('https://127.0.0.1/eventstream/clip/v2', {
+      headers: { 'hue-application-key': 'secret' },
+      bridgeId: BRIDGE_ID,
+    }).catch((caught) => caught);
+    assert.equal(error.tlsRefused, true);
+    assert.deepEqual(received, []);
+  } finally {
+    server.close();
+  }
+});
+
+test('openStream fails with the status of a bridge that refuses the stream', async (t) => {
+  t.after(() => mock.restoreAll());
+  const server = await serve((request, response) => {
+    response.writeHead(403);
+    response.end('{}');
+  });
+  tlsTo(server.url, BRIDGE_ID);
+  try {
+    const error = await openStream('https://127.0.0.1/eventstream/clip/v2', { bridgeId: BRIDGE_ID }).catch(
+      (caught) => caught,
+    );
+    assert.equal(error.httpStatus, 403);
   } finally {
     server.close();
   }

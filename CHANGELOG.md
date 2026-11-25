@@ -4,6 +4,43 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
 
 ## [Unreleased]
 
+### Added
+
+- Changes made outside Gladys (Hue app, dimmer, wall switch, Hue automations)
+  show up in Gladys at once with a square bridge (firmware 1.48 or later) or a
+  Hue Bridge Pro, instead of at the next refresh. The **Refresh interval** stays
+  as a safety net, and for the round bridge. A bridge paired over plain HTTP is
+  moved to HTTPS on its own to get them, with no new pairing.
+
+- A bridge that changed IP address is found again on its own, with no new
+  pairing: the integration looks for it on your network in the background, and
+  **Discover bridges** follows it right away. A bridge still paired over plain
+  HTTP, such as the round bridge, must be paired again.
+- After a migration to a Hue Bridge Pro, or a bridge replacement, **Pair bridge**
+  recognizes the new bridge: the lights already created in Gladys keep working,
+  with their rooms, scenes and history, instead of coming back as new devices.
+- **Pair bridge** on a bridge already paired reuses its access, without the link
+  button, instead of creating another user on the bridge.
+
+### Fixed
+
+- **Discover bridges** now finds every bridge of the network, a Hue Bridge Pro
+  next to a square bridge included: it uses mDNS first, then SSDP, and merges
+  what both find. Until now it stopped at the first method that found a bridge.
+
+- A Gladys scene acting on many lights at once no longer loses commands: the
+  requests to a bridge are now spaced out, and retried a few times when the
+  bridge says it is busy.
+- With two bridges at the same IP address (an old bridge and its replacement),
+  the connection status no longer flips between connected and unreachable, and
+  a Hue scene is recalled on the bridge that holds it.
+- **Forget unreachable bridges** no longer forgets, on the first click, a
+  bridge that blocks plain HTTP and could not be switched to HTTPS: like a
+  bridge that does not answer, it must have been failing for 5 minutes.
+- A clock set late after boot (a Raspberry Pi without a battery-backed clock)
+  no longer lets **Forget unreachable bridges** drop a bridge that has only just
+  stopped answering.
+
 ## [2.1.0] - 2026-11-24
 
 ### Added
