@@ -140,3 +140,23 @@ test('reconnect() drops a stream that may be dead, and opens a new one', async (
   assert.equal(fake.connections.length, 2);
   stream.stop();
 });
+
+test('an attempt that fails for good after stop() does not give up for the new stream', async () => {
+  // The bridge moved: the old stream is stopped while probing its old address.
+  let fail;
+  const givenUp = [];
+  const stream = new EventStream({
+    name: 'test',
+    open: () =>
+      new Promise((resolve, reject) => {
+        fail = () => reject(Object.assign(new Error('another bridge answers here'), { permanent: true }));
+      }),
+    onEvents: () => {},
+    onGiveUp: (error) => givenUp.push(error),
+  });
+  stream.start();
+  stream.stop();
+  fail();
+  await settle();
+  assert.deepEqual(givenUp, []);
+});

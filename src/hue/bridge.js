@@ -302,19 +302,25 @@ export class HueBridgeClient {
    * surface the Hue errors hidden in HTTP 200 bodies as thrown errors.
    * @param {string} path - Path appended to `http://<ip>`.
    * @param {object} [options] - Fetch options, plus `retries`: retries of a request that got no answer (default
-   * 1). `0` also disables the retries of a busy answer (429/5xx). `maxWaitMs`: how long it may wait in the
-   * bridge's queue (20 s by default); beyond, it fails with `queueTimeout` set, never retried.
+   * 1). `0` also disables the retries of a busy answer (429/5xx). `maxWaitMs`: the latest the request may be
+   * sent, from this call (20 s by default), all attempts and pauses included; beyond, it fails with
+   * `queueTimeout` set, or with the last error when no retry fits.
    * @returns {Promise<any>} Parsed JSON response, guaranteed error-free.
    * @throws {Error} With `.hueErrorType` set for a Hue business error.
    */
   async request(path, options = {}) {
     const { retries = DEFAULT_RETRIES, maxWaitMs = MAX_QUEUE_WAIT_MS, ...fetchOptions } = options;
+    // One deadline for every attempt: a retry must not reach the light after
+    // Gladys gave up on the command.
+    const sendBy = performance.now() + maxWaitMs;
     let silentRetries = 0;
     let busyRetries = 0;
 
     for (;;) {
       try {
-        const body = await this.queue.run(() => this.fetchOnce(path, fetchOptions), { maxWaitMs });
+        const body = await this.queue.run(() => this.fetchOnce(path, fetchOptions), {
+          maxWaitMs: sendBy - performance.now(),
+        });
         const hueError = findHueError(body);
         if (hueError) {
           // A business error: the bridge understood us and said no. Retrying
@@ -341,6 +347,9 @@ export class HueBridgeClient {
           busyRetries += 1;
         } else {
           throw error;
+        }
+        if (performance.now() + delay >= sendBy) {
+          throw error; // no time left for another attempt
         }
         logger.debug(`Retrying ${this.redact(path)} on bridge ${this.ip}: ${error.message}`);
         await sleep(delay);
@@ -383,11 +392,12 @@ export class HueBridgeClient {
 
   /**
    * Fetch every light known by the bridge.
+   * @param {{ retries?: number }} [options] - Request options (see `request`).
    * @returns {Promise<Record<string, object>>} Lights indexed by bridge id.
    */
-  async getLights() {
+  async getLights(options = {}) {
     this.assertUsername();
-    return this.request(`/api/${this.username}/lights`);
+    return this.request(`/api/${this.username}/lights`, options);
   }
 
   /**

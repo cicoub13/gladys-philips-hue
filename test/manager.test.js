@@ -11,6 +11,7 @@ import { FEATURE } from '../src/hue/mapping.js';
 import { resetDiscoveryCache } from '../src/hue/discovery.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { fingerprintOf } from '../src/hue/https.js';
+import { RequestQueue } from '../src/hue/queue.js';
 import { stubHttps } from './fake-https.js';
 
 // The SDK's fake Gladys, recording everything published. The `test` selector
@@ -767,6 +768,48 @@ test('a new bridge holding the lights of a forgotten bridge takes its key back',
   mock.restoreAll();
 });
 
+test('bulbs moved from a bridge that was only busy do not make a new bridge replace it', async () => {
+  // Half of bridge A's bulbs moved to a new bridge B (the 50-light limit), while
+  // A answered 503 to the last scan: A must stay, with its other lights.
+  const { manager, gladys, store, client } = await makeManager();
+  await createAll(manager, gladys);
+  failReads(client, { message: 'HTTP 503', httpStatus: 503 });
+  await manager.syncDevices();
+  assert.equal(manager.unreachable.size, 1);
+  client.getLights = async () => ({ 3: client.light }); // answers again
+  manager.identifiedBridges = async () => ({ bridges: [IDENTIFIED_BRIDGE], ignored: [] });
+  serveHttp((url, options) =>
+    options.method === 'POST' ? [{ success: { username: 'new-key' } }] : { 1: { uniqueid: '00:17:88:01:aa' } },
+  );
+
+  const result = await manager.pairBridges();
+  assert.deepEqual(result.replaced, []);
+  assert.deepEqual(
+    store.list().map((bridge) => bridge.id),
+    ['b1', 'abc'],
+  );
+  manager.stop();
+  mock.restoreAll();
+});
+
+test("a bridge that just replaced another is not forgotten on the first click for the old one's silence", async () => {
+  const { manager, store, client } = await makeLostBridgeManager();
+  silentForLong(manager); // the old bridge has been silent for long
+  manager.identifiedBridges = async () => ({ bridges: [IDENTIFIED_BRIDGE], ignored: [] });
+  serveHttp((url, options) =>
+    options.method === 'POST' ? [{ success: { username: 'new-key' } }] : { 1: { uniqueid: '00:17:88:01:aa' } },
+  );
+  await manager.pairBridges();
+  mock.restoreAll();
+  assert.equal(store.list()[0].id, 'abc');
+
+  // The new bridge reboots for its first firmware update.
+  const { forgotten } = await manager.forgetUnreachableBridges();
+  assert.deepEqual(forgotten, []);
+  assert.equal(client.down, true, 'the fake still does not answer');
+  manager.stop();
+});
+
 test('a bulb moved from a working bridge to a new one does not merge the two bridges', async () => {
   const { manager, gladys, store } = await makeManager();
   await createAll(manager, gladys);
@@ -1159,6 +1202,98 @@ test('the stream of a forgotten bridge is closed, and every stream once disconne
   assert.equal(client.streams[1].response.destroyed, true);
   assert.equal(manager.streams.size, 0);
   manager.stop();
+});
+
+test('a pushed change after a connectivity blip does not show the light cut', async (t) => {
+  // Only a second report of its connectivity, or a read, confirms the cut: a
+  // dimming shows the light still talks to the bridge.
+  const { manager, gladys, client, onOff } = await makePushManager(t);
+  client.push([{ id: 'rid-3', on: { on: true }, type: 'light' }]);
+  await flush();
+  client.push([{ id: 'zb-3', status: 'connectivity_issue', type: 'zigbee_connectivity' }]);
+  t.mock.timers.tick(1000);
+  await flush();
+  client.push([{ id: 'rid-3', dimming: { brightness: 40 }, type: 'light' }]);
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.deepEqual(onOff(), [1]);
+  assert.notEqual(gladys.fake.transports.at(-1).transport, 'unreachable');
+  manager.stop();
+});
+
+test('the pushed changes stay within their share of the Gladys budget, and a held-back change is not lost', async (t) => {
+  const { manager, gladys, client } = await makePushManager(t);
+  manager.pushedStates = Array.from({ length: 200 }, () => performance.now()); // budget spent
+  const lightOn = () =>
+    gladys.fake.states.some((state) => state.device_feature_external_id === `${SALON_ID}:on-off` && state.state === 1);
+  client.push([{ id: 'rid-3', on: { on: true }, type: 'light' }]);
+  await flush();
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(lightOn(), false, 'held back');
+
+  manager.pushedStates = []; // a minute later
+  t.mock.timers.tick(1000);
+  await flush();
+  const onOff = gladys.fake.states.findLast((state) => state.device_feature_external_id === `${SALON_ID}:on-off`);
+  assert.equal(onOff.state, 1);
+  manager.stop();
+});
+
+test('a command the bridge applied is not reported failed when Gladys refuses its echo', async (t) => {
+  const { manager, gladys, client } = await makeManager();
+  await createAll(manager, gladys);
+  t.mock.method(gladys, 'publishChangedStates', async () => {
+    throw new Error('HTTP 429 Too Many Requests');
+  });
+  await manager.setValue({ external_id: SALON_ID }, { external_id: `${SALON_ID}:on-off` }, 1);
+  assert.equal(client.lastSetState.state.on, true);
+});
+
+test('a command dropped by a busy queue neither marks the bridge unreachable nor reopens its stream', async (t) => {
+  const { manager, gladys, client } = await makePushManager(t);
+  client.setLightState = async () => {
+    throw Object.assign(new Error('Bridge 192.168.1.10 is busy: dropped after waiting 4100 ms'), {
+      queueTimeout: true,
+    });
+  };
+  await assert.rejects(() => manager.setValue({ external_id: SALON_ID }, { external_id: `${SALON_ID}:on-off` }, 1));
+  assert.equal(gladys.fake.connectionStatus.connected, true);
+  assert.equal(manager.unreachable.size, 0);
+  assert.equal(client.streams[0].response.destroyed, false);
+  manager.stop();
+});
+
+test('a bridge whose address now serves another certificate gets no stream, whatever step finds it', async (t) => {
+  const { manager, gladys, client } = await makeManager();
+  withPush(client);
+  await createAll(manager, gladys);
+  let asked = 0;
+  client.isV2 = async () => {
+    asked += 1;
+    throw Object.assign(new Error('Refused the TLS certificate of 192.168.1.10'), { tlsRefused: true });
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  manager.startPolling();
+  await flush();
+  t.mock.timers.tick(120000);
+  await flush();
+  assert.equal(asked, 1);
+  assert.equal(manager.streams.size, 0);
+  manager.stop();
+});
+
+test('Forget probes the bridges out of their queue, where requests to a dead bridge are stuck', async () => {
+  const { manager, client } = await makeManager();
+  const overrides = [];
+  manager.clientFor = (bridge, override = {}) => {
+    overrides.push(override);
+    return client;
+  };
+  await manager.forgetUnreachableBridges();
+  const [probe] = overrides;
+  assert.ok(probe.queue instanceof RequestQueue);
+  assert.notEqual(probe.queue, manager.queueOf(manager.store.list()[0]));
 });
 
 test('a refresh that cannot reach the bridge opens its stream again', async (t) => {

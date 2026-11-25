@@ -154,6 +154,17 @@ test('a bridge that stays busy fails the request after the last retry', async (t
   assert.equal(calls.length, 4);
 });
 
+test('a command is never retried past its deadline, which covers every attempt', async () => {
+  // A 503 after a long wait in the queue: the retry used to get a full wait of
+  // its own, and reach the light seconds after Gladys reported a failure.
+  const { calls } = mockFetch([{ ok: false, status: 503 }]);
+  const client = new HueBridgeClient('192.168.1.10', USERNAME);
+  const sent = Date.now();
+  await assert.rejects(() => client.request('/api/x/lights/3/state', { method: 'PUT', maxWaitMs: 200 }), /HTTP 503/);
+  assert.equal(calls.length, 1, 'the first pause (250 ms) does not fit');
+  assert.ok(Date.now() - sent < 200);
+});
+
 test('a bridge that does not answer is retried once only: each attempt costs a full timeout', async () => {
   const { calls } = mockFetch([{ throws: new Error('connect EHOSTUNREACH') }]);
   await assert.rejects(() => new HueBridgeClient('192.168.1.10', USERNAME).getLights(), /EHOSTUNREACH/);

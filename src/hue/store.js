@@ -219,15 +219,6 @@ export class BridgeStore {
   }
 
   /**
-   * Store a bridge that replaces another one (a migration to a Bridge Pro, a
-   * replaced bridge), then persist. The previous one, stored or forgotten, is
-   * dropped: `bridge` carries its `platformKey`, so its lights keep their
-   * external_ids. Like `upsert`, a write failure is kept in `persistError`.
-   * @param {object} previous - Entry of `list()` or of `forgotten`.
-   * @param {object} bridge - The new bridge, with its credentials and `platformKey`.
-   * @returns {Promise<void>} Resolves once stored (persisted or in memory only).
-   */
-  /**
    * Give a new entry a key of its own when another stored bridge has its key
    * already: a bridge replaced by another one (which took its key) and then
    * paired again as a bridge of its own. Two bridges with one key would share
@@ -248,6 +239,15 @@ export class BridgeStore {
     return { ...entry, platformKey: `${key}-${suffix}` };
   }
 
+  /**
+   * Store a bridge that replaces another one (a migration to a Bridge Pro, a
+   * replaced bridge), then persist. The previous one, stored or forgotten, is
+   * dropped: `bridge` carries its `platformKey`, so its lights keep their
+   * external_ids. Like `upsert`, a write failure is kept in `persistError`.
+   * @param {object} previous - Entry of `list()` or of `forgotten`.
+   * @param {object} bridge - The new bridge, with its credentials and `platformKey`.
+   * @returns {Promise<void>} Resolves once stored (persisted or in memory only).
+   */
   async replace(previous, bridge) {
     this.bridges = [...this.bridges.filter((known) => known !== previous), bridge];
     this.forgotten = this.forgotten.filter((known) => known !== previous);

@@ -26,14 +26,18 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
   `http` is moved to HTTPS proactively, same proof and persistence as the 403 switch), `isV2()`
   (unauthenticated `GET /clip/v2/resource` → 403, like aiohue's `is_v2_bridge`), `getResources('light')` +
   `('zigbee_connectivity')` for the index, then `GET /eventstream/clip/v2` (`openStream` in `https.js`:
-  same certificate check, TCP keepalive 30 s, not queued). Wrong certificate (`tlsRefused`, `wrongBridge`)
-  or no v2 (any status but 403 and 429/5xx) → `permanent`: `withoutPush` (WeakMap bridge → ip), polled only
-  until restart or until it moves. Anything else, `ECONNREFUSED` included (round bridge, but also a booting
+  same certificate check, TCP keepalive 30 s, not queued). Wrong certificate (`tlsRefused`, `wrongBridge`,
+  at any of these steps) or no v2 (any status but 403 and 429/5xx) → `permanent`: `withoutPush` (WeakMap
+  bridge → the ip that attempt used), polled only until restart or until it moves. An attempt that ends
+  after `stop()` is ignored. Anything else, `ECONNREFUSED` included (round bridge, but also a booting
   one), reconnects with backoff (1 s → 1 min, started over only after a connection that lasted 30 s); a refresh that gets no answer calls `stream.reconnect()` (`markBridge`); each (re)connection
   re-reads the created lights (`refreshSoon`). Events → `lightPatches` (`src/hue/v2.js`, pure: v2 light by
   rid or `id_v1` → v1 hue id, zigbee_connectivity → `reachable` of every light of its device) →
-  `queuePatches` (first at once, then merged, at most one batch per bridge per 1 s, `EVENT_THROTTLE_MS`) →
-  `applyPatches` (cache, `commandSeq`, `debounceUnreachable`, created lights only, transports). The refresh
+  `queuePatches` (first at once, then merged, at most one batch per bridge per 1 s, `EVENT_THROTTLE_MS`;
+  held back, still merged, while the pushes used their 200 states of the last minute, `pushBudget`, all
+  bridges together: Gladys takes 300) → `applyPatches` (cache, `commandSeq`, `debounceUnreachable` with
+  `reports` only for a patch carrying `reachable`, one `publishChangedStates` per batch, created lights
+  only, transports). The refresh
   loop keeps running beside the streams, as a safety net and for the round bridge.
 - `src/hue/`: `bridge.js` (REST client: v1, plus the v2 calls of the push), `queue.js` (per-bridge request
   pacing), `eventstream.js` (SSE + reconnection), `v2.js` (pure: v2 events → v1 state), `https.js` (`node:https` transport + TLS pinning),
@@ -58,8 +62,12 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
 - The username is a full-access key: never let it reach a log/error (`redact()`); store file is `0600`.
 - Every request of a stored bridge goes through its `RequestQueue` (`manager.queueOf(bridge)`, shared
   by all its clients): at most 3 in flight, one start per 100 ms (the bridge takes ~10 req/s). A request
-  that waited more than 20 s for its turn (4 s for `setLightState`) is dropped with `queueTimeout`, never
-  retried: behind a bridge that stopped answering, a command must not land after Gladys gave up on it.
+  must be sent within 20 s of the `request()` call (4 s for `setLightState`), every attempt and pause
+  included: past that it is dropped with `queueTimeout` (or a retry is not made), never retried. Behind a
+  bridge that stopped answering, a command must not land after Gladys gave up on it. `queueTimeout` means
+  busy, not unreachable (`isUnreachable` is false for it). Forget and `confirmGone` probe with a queue of
+  their own (`clientFor(bridge, { queue })`): requests stuck on a dead bridge would eat their timeout.
+  `setValue` never fails on its echo (a Gladys 429): the bridge applied the command.
 - Retries: 1 retry after 400 ms for a request that got no answer; up to 3 for a busy answer (429/5xx),
   after 250/500/1000 ms, each attempt queued again (a command must answer within Gladys' 5 s). Hue
   business errors never retried. `retries: 0` disables both: `createUser` (not idempotent, bridge
@@ -90,9 +98,12 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
 - Pairing (`pairIdentified`, under `exclusive`): (1) a stored bridge whose username still works
   (`keyWorks`, behind `keepsPin`) is stored again without `createUser` (no orphan user); (2) otherwise
   `createUser`, then `previousOwnerOf`: a stored bridge in `unreachable`, or a forgotten one, at least
-  half of whose created lights (by `uniqueid` in the external_id) the new bridge holds. Then
+  half of whose created lights (by `uniqueid` in the external_id) the new bridge holds. A stored one must
+  pass `confirmGone`: read again right now (3.5 s, no retry), it answers gone, or still nothing after
+  being silent; any other answer (busy included) keeps it. Then
   `replaceBridge` → `store.replace(previous, { ...credentials, platformKey: platformKeyOf(previous) })`:
-  the new bridge takes the old key, so the external_ids are kept; `result.replaced` feeds the message.
+  the new bridge takes the old key, so the external_ids are kept, and the old key's `unreachable` and
+  `silentSince` are cleared; `result.replaced` feeds the message.
   The username of a stored bridge is NEVER tried on a new one, although a Bridge Pro migration moves the
   app keys (HA does try it): only the id it announces, which anyone can claim, says who it is.
   `store.upsert` gives a new entry whose key is taken (`withFreeKey`: a replaced bridge paired again on
@@ -144,8 +155,9 @@ certFingerprint?, platformKey? }], forgotten?: [{ id?, ip, platformKey? }] }` (`
   is attributed to its bridge by external_id (`ownerOf`: longest `platformKey || id || ip` + `-`
   prefix), not by `entry.bridgeIp`; `callBridge`/`markBridge` take the bridge object, and so do the
   scene candidates (`activateScene`).
-- A light with `state.reachable: false` on two reads in a row (cut at the wall; one read may be a
-  mesh blip, `debounceUnreachable`) is published off, with the `unreachable` transport badge
+- A light with `state.reachable: false` on two reports in a row (cut at the wall; one may be a mesh
+  blip, `debounceUnreachable`, `entry.cutShown`; a report is a read or a pushed connectivity change) is
+  published off, with the `unreachable` transport badge
   (`publishLightTransports`, created devices only, only on change, cache in `manager.transports`).
   `forgetUnreachableBridges()` (button `forget_bridges`) drops a stored bridge when its read gets an
   answer that `isGone()` (Hue error 1, any HTTP status but 429/5xx), or no answer after

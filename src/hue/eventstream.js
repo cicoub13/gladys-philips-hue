@@ -133,6 +133,9 @@ export class EventStream {
     try {
       opened = await this.open();
     } catch (error) {
+      if (this.stopped) {
+        return; // stopped meanwhile (the bridge moved, say): this attempt says nothing any more
+      }
       if (error.permanent) {
         logger.info(`No event stream from ${this.name} (${error.message}): its lights are refreshed by polling only`);
         this.stopped = true;
