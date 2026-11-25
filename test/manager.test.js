@@ -9,6 +9,7 @@ import { BridgeStore } from '../src/hue/store.js';
 import { FEATURE } from '../src/hue/mapping.js';
 import { resetDiscoveryCache } from '../src/hue/discovery.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
+import { fingerprintOf } from '../src/hue/https.js';
 import { stubHttps } from './fake-https.js';
 
 // The SDK's fake Gladys, recording everything published. The `test` selector
@@ -527,6 +528,242 @@ test('a bridge paired over HTTP is moved to HTTPS for good once its firmware blo
   assert.ok(bridge.certFingerprint);
   assert.equal(bridge.username, 'user-1', 'no new pairing');
   assert.equal(bridge.id, '001788fffe123456', 'same bridge: the external_ids are kept');
+  mock.restoreAll();
+});
+
+/**
+ * Answer the plain HTTP requests of the tests below, by URL.
+ * @param {(url: string, options: object) => any} answer - Body to serve; a thrown error fails the request.
+ * @returns {string[]} The requests made, as `METHOD url`.
+ */
+function serveHttp(answer) {
+  const calls = [];
+  mock.method(global, 'fetch', async (url, options = {}) => {
+    calls.push(`${options.method || 'GET'} ${url}`);
+    const body = answer(String(url), options);
+    return { ok: true, status: 200, json: async () => body };
+  });
+  return calls;
+}
+
+const UNAUTHORIZED = [{ error: { type: 1, description: 'unauthorized user' } }];
+
+/**
+ * makeManager() with its only light created in Gladys, and its bridge b1 no
+ * longer answering (replaced, reset, or moved).
+ * @returns {Promise<object>} Same as makeManager().
+ */
+async function makeLostBridgeManager() {
+  const made = await makeManager();
+  await createAll(made.manager, made.gladys);
+  made.client.down = true;
+  await made.manager.syncDevices();
+  return made;
+}
+
+test('a paired bridge found at a new address is followed there, with the same username', async () => {
+  // A new DHCP lease: until now, only a new pairing (and the link button) fixed it.
+  const { manager, store } = await makeLostBridgeManager();
+  const moved = await manager.followMovedBridges([{ id: 'b1', ip: '192.168.1.11', scheme: 'http' }]);
+  assert.equal(moved.length, 1);
+  assert.deepEqual(
+    store.list().map((bridge) => [bridge.ip, bridge.username]),
+    [['192.168.1.11', 'user-1']],
+  );
+  manager.stop();
+});
+
+test('a bridge that answers at its address is not moved', async () => {
+  const { manager, store } = await makeManager();
+  await manager.syncDevices();
+  await manager.followMovedBridges([{ id: 'b1', ip: '192.168.1.11', scheme: 'http' }]);
+  assert.equal(store.list()[0].ip, '192.168.1.10');
+});
+
+test('a bridge is not followed to an address whose certificate is not the one pinned', async () => {
+  // The bridge id is public: anything can claim it, and would get the username.
+  const { manager, store } = await makeLostBridgeManager();
+  Object.assign(store.list()[0], { scheme: 'https', certFingerprint: 'AA:BB' });
+  await manager.followMovedBridges([
+    { id: 'b1', ip: '192.168.1.11', scheme: 'https', certFingerprint: 'CC:DD' },
+    { id: 'b1', ip: '192.168.1.12', scheme: 'http' },
+  ]);
+  assert.equal(store.list()[0].ip, '192.168.1.10');
+
+  await manager.followMovedBridges([{ id: 'b1', ip: '192.168.1.13', scheme: 'https', certFingerprint: 'aabb' }]);
+  assert.equal(store.list()[0].ip, '192.168.1.13');
+  manager.stop();
+});
+
+test('the background resync finds a bridge that changed address, without the cloud', async () => {
+  const { manager, gladys, store, client } = await makeLostBridgeManager();
+  const silent = makeFakeClient();
+  silent.down = true;
+  client.down = false;
+  manager.clientFor = (bridge) => (bridge.ip === '192.168.1.11' ? client : silent);
+  gladys.fake.scanResults = {
+    mdns: [{ name: 'Philips Hue - 1._hue._tcp.local', addresses: ['192.168.1.11'], txt: ['bridgeid=B1'] }],
+  };
+  resetDiscoveryCache();
+  stubHttps(); // no HTTPS: identified over HTTP
+  const calls = serveHttp((url) => {
+    assert.ok(!url.includes('meethue'), 'never the cloud');
+    return { bridgeid: 'B1', modelid: 'BSB002' };
+  });
+
+  await manager.resync();
+  assert.equal(store.list()[0].ip, '192.168.1.11');
+  assert.equal(gladys.fake.connectionStatus.connected, true);
+  assert.deepEqual(calls, ['GET http://192.168.1.11/api/config']);
+  manager.stop();
+  mock.restoreAll();
+});
+
+test('pairing a bridge again reuses its username when it still works: no link button, no orphan user', async () => {
+  const { manager, store } = await makeManager();
+  manager.identifiedBridges = async () => ({
+    bridges: [{ ...IDENTIFIED_BRIDGE, id: 'b1', ip: '192.168.1.10' }],
+    ignored: [],
+  });
+  const calls = serveHttp(() => ({ 3: { name: 'Salon' } }));
+
+  const result = await manager.pairBridges();
+  assert.equal(result.paired.length, 1);
+  assert.deepEqual(calls, ['GET http://192.168.1.10/api/user-1/lights']);
+  assert.equal(store.list()[0].username, 'user-1');
+  mock.restoreAll();
+});
+
+test('a bridge migrated to a Bridge Pro is paired without the link button, and keeps the devices', async () => {
+  // The migration moves the keys of the apps to the Bridge Pro, under a new
+  // bridge id: until now every light came back as a new device.
+  const { manager, gladys, store, client } = await makeLostBridgeManager();
+  const pro = {
+    ...IDENTIFIED_BRIDGE,
+    ip: '192.168.1.50',
+    id: 'c42996fffe0a1b2c',
+    model: 'BSB003',
+    scheme: 'https',
+    certFingerprint: fingerprintOf(Buffer.from('cert')),
+  };
+  manager.identifiedBridges = async () => ({ bridges: [pro], ignored: [] });
+  const { calls } = stubHttps((url) => ({
+    body: url.endsWith('/api/user-1/lights') ? { 7: { name: 'Salon', uniqueid: '00:17:88:01:aa' } } : UNAUTHORIZED,
+    cn: pro.id,
+  }));
+
+  const result = await manager.pairBridges();
+  assert.deepEqual(
+    result.replaced.map(({ bridge, previous }) => [bridge.id, previous.id]),
+    [['c42996fffe0a1b2c', 'b1']],
+  );
+  assert.ok(
+    calls.every((call) => call.method !== 'POST'),
+    'no new user',
+  );
+  assert.deepEqual(
+    store.list().map((bridge) => [bridge.id, bridge.ip, bridge.username, bridge.platformKey]),
+    [['c42996fffe0a1b2c', '192.168.1.50', 'user-1', 'b1']],
+  );
+
+  // Its lights come back under the same external_ids, whatever their new Hue ids.
+  client.down = false;
+  client.getLights = async () => ({ 7: client.light });
+  await manager.syncDevices();
+  assert.deepEqual([...manager.registry.keys()], [SALON_ID]);
+  assert.equal(manager.registry.get(SALON_ID).hueId, '7');
+  assert.equal(gladys.fake.connectionStatus.connected, true);
+  manager.stop();
+  mock.restoreAll();
+});
+
+test('a username is never tried on a bridge over plain HTTP, nor taken from a bridge that answers', async () => {
+  const notPressed = [{ error: { type: 101, description: 'link button not pressed' } }];
+  const { manager } = await makeManager();
+  await manager.syncDevices(); // b1 answers
+  const { calls } = stubHttps(() => ({ body: notPressed, cn: 'other' }));
+  manager.identifiedBridges = async () => ({
+    bridges: [
+      { ...IDENTIFIED_BRIDGE, id: 'other', scheme: 'https', certFingerprint: fingerprintOf(Buffer.from('cert')) },
+    ],
+    ignored: [],
+  });
+  await manager.pairBridges();
+  assert.deepEqual(
+    calls.map((call) => `${call.method} ${call.url}`),
+    ['POST https://192.168.1.42/api'],
+  );
+  mock.restoreAll();
+
+  const lost = await makeLostBridgeManager();
+  const httpCalls = serveHttp(() => notPressed);
+  lost.manager.identifiedBridges = async () => ({ bridges: [{ ...IDENTIFIED_BRIDGE, id: 'other' }], ignored: [] });
+  await lost.manager.pairBridges();
+  assert.deepEqual(httpCalls, ['POST http://192.168.1.42/api']);
+  lost.manager.stop();
+  mock.restoreAll();
+});
+
+test('a new bridge holding the lights of a bridge that no longer answers takes its place', async () => {
+  // A replaced bridge: the bulbs keep their Zigbee MAC (uniqueid).
+  const { manager, store } = await makeLostBridgeManager();
+  manager.identifiedBridges = async () => ({ bridges: [IDENTIFIED_BRIDGE], ignored: [] });
+  serveHttp((url, options) =>
+    options.method === 'POST'
+      ? [{ success: { username: 'new-key' } }]
+      : url.includes('/new-key/')
+        ? { 1: { name: 'Salon', uniqueid: '00:17:88:01:aa' } }
+        : UNAUTHORIZED,
+  );
+
+  const result = await manager.pairBridges();
+  assert.equal(result.replaced.length, 1);
+  assert.deepEqual(
+    store.list().map((bridge) => [bridge.id, bridge.username, bridge.platformKey]),
+    [['abc', 'new-key', 'b1']],
+  );
+  manager.stop();
+  mock.restoreAll();
+});
+
+test('a new bridge holding the lights of a forgotten bridge takes its key back', async () => {
+  const { manager, store } = await makeLostBridgeManager();
+  silentForLong(manager);
+  await manager.forgetUnreachableBridges();
+  assert.equal(store.forgotten.length, 1);
+  manager.identifiedBridges = async () => ({ bridges: [IDENTIFIED_BRIDGE], ignored: [] });
+  serveHttp((url, options) =>
+    options.method === 'POST' ? [{ success: { username: 'new-key' } }] : { 1: { uniqueid: '00:17:88:01:aa' } },
+  );
+
+  await manager.pairBridges();
+  assert.deepEqual(
+    store.list().map((bridge) => [bridge.id, bridge.platformKey]),
+    [['abc', 'b1']],
+  );
+  assert.deepEqual(store.forgotten, []);
+  manager.stop();
+  mock.restoreAll();
+});
+
+test('a bulb moved from a working bridge to a new one does not merge the two bridges', async () => {
+  const { manager, gladys, store } = await makeManager();
+  await createAll(manager, gladys);
+  await manager.syncDevices(); // b1 answers
+  manager.identifiedBridges = async () => ({ bridges: [IDENTIFIED_BRIDGE], ignored: [] });
+  serveHttp((url, options) =>
+    options.method === 'POST' ? [{ success: { username: 'new-key' } }] : { 1: { uniqueid: '00:17:88:01:aa' } },
+  );
+
+  const result = await manager.pairBridges();
+  assert.deepEqual(result.replaced, []);
+  assert.deepEqual(
+    store.list().map((bridge) => [bridge.id, bridge.platformKey]),
+    [
+      ['b1', undefined],
+      ['abc', undefined],
+    ],
+  );
   mock.restoreAll();
 });
 

@@ -4,7 +4,23 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
 
 ## [Unreleased]
 
+### Added
+
+- A bridge that changed IP address is found again on its own, with no new
+  pairing: the integration looks for it on your network in the background, and
+  **Discover bridges** follows it right away.
+- After a migration to a Hue Bridge Pro, or a bridge replacement, **Pair bridge**
+  recognizes the new bridge: the lights already created in Gladys keep working,
+  with their rooms, scenes and history, instead of coming back as new devices.
+  After a migration, no link-button press is needed.
+- **Pair bridge** on a bridge already paired reuses its access, without the link
+  button, instead of creating another user on the bridge.
+
 ### Fixed
+
+- **Discover bridges** now finds every bridge of the network, a Hue Bridge Pro
+  next to a square bridge included: it uses mDNS first, then SSDP, and merges
+  what both find. Until now it stopped at the first method that found a bridge.
 
 - A Gladys scene acting on many lights at once no longer loses commands: the
   requests to a bridge are now spaced out, and retried a few times when the

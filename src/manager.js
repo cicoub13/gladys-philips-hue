@@ -17,6 +17,7 @@ import { createLogger, DEVICE_TRANSPORTS } from '@gladysassistant/integration-sd
 import { HueBridgeClient, HUE_LINK_BUTTON_NOT_PRESSED } from './hue/bridge.js';
 import { discoverBridges } from './hue/discovery.js';
 import { identifyBridges, parseBridgeConfig } from './hue/identify.js';
+import { normalizeFingerprint } from './hue/https.js';
 import { BridgeStore } from './hue/store.js';
 import { RequestQueue } from './hue/queue.js';
 import { FEATURE, featureValueToHueState, hueStateToFeatureStates, lightToDevicePayload } from './hue/mapping.js';
@@ -114,6 +115,40 @@ function isGone(error) {
  */
 function platformKeyOf(bridge) {
   return bridge.platformKey || bridge.id || bridge.ip;
+}
+
+/**
+ * Whether a stored bridge's username may be sent to a bridge identification
+ * just found: over HTTPS, its certificate must be the one pinned. The bridge id
+ * it announces is public, and anything on the network can claim it.
+ * @param {{ certFingerprint?: string }} stored - Stored bridge.
+ * @param {{ scheme: string, certFingerprint?: string }} found - Identified bridge.
+ * @returns {boolean} True when the username may be sent.
+ */
+function keepsPin(stored, found) {
+  if (!stored.certFingerprint) {
+    return true; // paired over HTTP: the username already went in clear
+  }
+  return (
+    found.scheme === 'https' &&
+    normalizeFingerprint(found.certFingerprint) === normalizeFingerprint(stored.certFingerprint)
+  );
+}
+
+/**
+ * What to store for an identified bridge and a username.
+ * @param {{ id: string, ip: string, scheme: string, certFingerprint?: string }} found - Identified bridge.
+ * @param {string} username - Its username.
+ * @returns {object} Store entry.
+ */
+function credentialsOf(found, username) {
+  return {
+    id: found.id,
+    ip: found.ip,
+    username,
+    scheme: found.scheme,
+    ...(found.certFingerprint ? { certFingerprint: found.certFingerprint } : {}),
+  };
 }
 
 export class HueManager {
@@ -571,11 +606,55 @@ export class HueManager {
     clearTimeout(this.resyncTimer);
     this.resyncTimer = undefined;
     try {
+      await this.searchMovedBridges();
       await this.syncDevices();
     } catch (error) {
       logger.warn(`Background resync failed: ${error.message}`);
       this.scheduleResync();
     }
+  }
+
+  /**
+   * Look for the paired bridges that fail at their address, in case they only
+   * changed it (a new DHCP lease): LAN discovery only, never the cloud.
+   * @returns {Promise<void>} Resolves once done; never rejects.
+   */
+  async searchMovedBridges() {
+    if (!this.store.list().some((bridge) => bridge.id && this.unreachable.has(platformKeyOf(bridge)))) {
+      return;
+    }
+    try {
+      const { bridges } = await identifyBridges(await discoverBridges(this.gladys, { cloud: false }));
+      await this.exclusive(() => this.followMovedBridges(bridges));
+    } catch (error) {
+      logger.warn(`Could not look for the bridges that changed address: ${error.message}`);
+    }
+  }
+
+  /**
+   * Follow the paired bridges that changed address: a bridge that fails at its
+   * stored address, and that identification just found elsewhere under its id,
+   * gets the new address and keeps its username, so it needs no new pairing.
+   * Run under the bridge lock.
+   * @param {Array<object>} identified - Bridges proven by identification.
+   * @returns {Promise<object[]>} Stored bridges whose address was updated.
+   */
+  async followMovedBridges(identified) {
+    const moved = [];
+    for (const found of identified) {
+      const bridge = this.store.list().find((stored) => stored.id && stored.id === found.id);
+      if (!bridge || bridge.ip === found.ip || !this.unreachable.has(platformKeyOf(bridge))) {
+        continue;
+      }
+      if (!keepsPin(bridge, found)) {
+        logger.warn(`Bridge ${bridge.id} found at ${found.ip} with another certificate than the one pinned, ignored`);
+        continue;
+      }
+      logger.info(`Bridge ${bridge.id} moved from ${bridge.ip} to ${found.ip}`);
+      await this.store.upsert(credentialsOf(found, bridge.username));
+      moved.push(bridge);
+    }
+    return moved;
   }
 
   /**
@@ -1145,7 +1224,10 @@ export class HueManager {
    * @returns {Promise<{ bridges: Array<object>, ignored: string[] }>} Proven bridges and rejected addresses.
    */
   async identifiedBridges() {
-    return identifyBridges(await this.candidateBridges());
+    const identified = await identifyBridges(await this.candidateBridges());
+    // A paired bridge found at a new address is followed there.
+    await this.exclusive(() => this.followMovedBridges(identified.bridges));
+    return identified;
   }
 
   /**
@@ -1153,50 +1235,177 @@ export class HueManager {
    * been pressed). Successfully paired bridges are persisted.
    *
    * The outcome is split per cause so the UI can tell the user what to actually
-   * do next, instead of a single "it failed".
-   * @returns {Promise<{ paired: object[], pending: object[], unreachable: object[], notABridge: string[] }>} Result per bridge.
+   * do next, instead of a single "it failed". `replaced` lists the bridges that
+   * took the place of a previous one (a migration to a Bridge Pro), whose lights
+   * keep their devices.
+   * @returns {Promise<{ paired: object[], pending: object[], unreachable: object[], notABridge: string[],
+   *   replaced: Array<{ bridge: object, previous: object }> }>} Result per bridge.
    */
   async pairBridges() {
     const { bridges, ignored } = await this.identifiedBridges();
-    const result = { paired: [], pending: [], unreachable: [], notABridge: ignored };
+    const result = { paired: [], pending: [], unreachable: [], notABridge: ignored, replaced: [] };
     // Only the store change waits for a running Forget: discovery above does not.
     await this.exclusive(() => this.pairIdentified(bridges, result));
     return result;
   }
 
   /**
-   * The store part of `pairBridges`, run under the bridge lock.
+   * The store part of `pairBridges`, run under the bridge lock. A bridge whose
+   * stored username still works, or that took over the username of a paired
+   * bridge (a migration keeps the keys of the apps), needs no link button.
    * @param {Array<object>} bridges - Identified bridges.
-   * @param {{ paired: object[], pending: object[], unreachable: object[] }} result - Filled in place.
+   * @param {{ paired: object[], pending: object[], unreachable: object[], replaced: object[] }} result - Filled
+   * in place.
    * @returns {Promise<void>} Resolves once every bridge was tried.
    */
   async pairIdentified(bridges, result) {
     for (const bridge of bridges) {
-      // Reuse what identification already learned: the scheme that answered and
-      // the certificate pinned on the way.
-      const client = new HueBridgeClient(bridge.ip, undefined, {
-        scheme: bridge.scheme,
-        id: bridge.id,
-        certFingerprint: bridge.certFingerprint,
-      });
-      try {
-        const username = await client.createUser(APP_NAME);
-        await this.store.upsert({
-          id: bridge.id,
-          ip: bridge.ip,
-          username,
-          scheme: bridge.scheme,
-          ...(client.certFingerprint ? { certFingerprint: client.certFingerprint } : {}),
-        });
+      // Like `upsert`: by id, or an entry saved without one at this address.
+      const stored =
+        this.store.list().find((known) => known.id === bridge.id) ||
+        this.store.list().find((known) => !known.id && known.ip === bridge.ip);
+      if (stored && keepsPin(stored, bridge) && (await this.keyWorks(bridge, stored.username))) {
+        // Paired already: no new user, which would be left orphan on the bridge.
+        await this.store.upsert(credentialsOf(bridge, stored.username));
         result.paired.push(bridge);
-      } catch (error) {
-        if (error.hueErrorType === HUE_LINK_BUTTON_NOT_PRESSED) {
-          result.pending.push(bridge);
-        } else {
-          logger.warn(`Pairing with ${bridge.ip} failed: ${error.message}`);
-          result.unreachable.push(bridge);
+        continue;
+      }
+      const owner = stored ? undefined : await this.keyOwnerOf(bridge);
+      if (owner) {
+        await this.replaceBridge(bridge, owner, credentialsOf(bridge, owner.username), result);
+        continue;
+      }
+      await this.pairWithButton(bridge, Boolean(stored), result);
+    }
+  }
+
+  /**
+   * Pair a bridge with the link button, and recognize it as the replacement of
+   * a bridge that does not answer, or was forgotten, when it holds its lights.
+   * @param {object} bridge - Identified bridge.
+   * @param {boolean} known - Whether it is stored already.
+   * @param {{ paired: object[], pending: object[], unreachable: object[], replaced: object[] }} result - Filled
+   * in place.
+   * @returns {Promise<void>} Resolves once tried.
+   */
+  async pairWithButton(bridge, known, result) {
+    // Reuse what identification already learned: the scheme that answered and
+    // the certificate pinned on the way.
+    const client = new HueBridgeClient(bridge.ip, undefined, {
+      scheme: bridge.scheme,
+      id: bridge.id,
+      certFingerprint: bridge.certFingerprint,
+    });
+    try {
+      const username = await client.createUser(APP_NAME);
+      const credentials = credentialsOf({ ...bridge, certFingerprint: client.certFingerprint }, username);
+      const previous = known ? undefined : await this.previousOwnerOf(client, bridge);
+      if (previous) {
+        await this.replaceBridge(bridge, previous, credentials, result);
+        return;
+      }
+      await this.store.upsert(credentials);
+      result.paired.push(bridge);
+    } catch (error) {
+      if (error.hueErrorType === HUE_LINK_BUTTON_NOT_PRESSED) {
+        result.pending.push(bridge);
+      } else {
+        logger.warn(`Pairing with ${bridge.ip} failed: ${error.message}`);
+        result.unreachable.push(bridge);
+      }
+    }
+  }
+
+  /**
+   * Store a bridge in place of the one it replaces, under that bridge's key, so
+   * that the lights already created keep their external_ids.
+   * @param {object} bridge - Identified bridge.
+   * @param {object} previous - Stored or forgotten bridge it replaces.
+   * @param {object} credentials - Store entry of the new bridge.
+   * @param {{ paired: object[], replaced: object[] }} result - Filled in place.
+   * @returns {Promise<void>} Resolves once stored.
+   */
+  async replaceBridge(bridge, previous, credentials, result) {
+    logger.info(`Bridge ${bridge.id} replaces bridge ${previous.id || previous.ip}`);
+    await this.store.replace(previous, { ...credentials, platformKey: platformKeyOf(previous) });
+    result.paired.push(bridge);
+    result.replaced.push({ bridge, previous });
+  }
+
+  /**
+   * Whether a username works on an identified bridge.
+   * @param {object} found - Identified bridge.
+   * @param {string} username - Username to try.
+   * @returns {Promise<boolean>} True when the bridge accepts it.
+   */
+  async keyWorks(found, username) {
+    const client = new HueBridgeClient(found.ip, username, {
+      scheme: found.scheme,
+      id: found.id,
+      certFingerprint: found.certFingerprint,
+    });
+    try {
+      await client.getLights();
+      return true;
+    } catch (error) {
+      logger.debug(`A stored username does not work on bridge ${found.ip}: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * The paired bridge whose username a new bridge accepts: migrating a bridge
+   * to a Bridge Pro moves the keys of the apps along. Only the bridges that fail
+   * are tried, and only over HTTPS (the bridges a migration targets), so that no
+   * username goes in clear, nor to a bridge that has nothing to do with it.
+   * @param {object} found - Identified bridge, not stored.
+   * @returns {Promise<object | undefined>} The stored bridge it replaces, if any.
+   */
+  async keyOwnerOf(found) {
+    if (found.scheme !== 'https') {
+      return undefined;
+    }
+    for (const previous of this.store.list()) {
+      if (previous.id !== found.id && this.unreachable.has(platformKeyOf(previous))) {
+        if (await this.keyWorks(found, previous.username)) {
+          return previous;
         }
       }
     }
+    return undefined;
+  }
+
+  /**
+   * The bridge, failing or forgotten, whose lights a newly paired bridge holds
+   * now: at least half of the lights created from it, by `uniqueid` (a Zigbee
+   * MAC, which a migration or a reset of the bulbs keeps). A failing bridge
+   * only, so that a bulb moved between two working bridges changes nothing.
+   * @param {HueBridgeClient} client - Client of the new bridge, paired.
+   * @param {{ id: string }} found - The new bridge, as identified.
+   * @returns {Promise<object | undefined>} Stored or forgotten bridge, if any.
+   */
+  async previousOwnerOf(client, found) {
+    let lights;
+    try {
+      lights = await client.getLights();
+    } catch (error) {
+      logger.debug(`Could not read the lights of the new bridge ${client.ip}: ${error.message}`);
+      return undefined;
+    }
+    const uniqueids = new Set(Object.values(lights || {}).map((light) => light && light.uniqueid));
+    const candidates = [
+      ...this.store.list().filter((bridge) => this.unreachable.has(platformKeyOf(bridge))),
+      // Not itself: forgotten then paired again, `upsert` gives it its key back.
+      ...this.store.forgotten.filter((entry) => entry.id !== found.id),
+    ];
+    for (const previous of candidates) {
+      const prefix = this.gladys.externalIds(DEVICE_TYPE, `${platformKeyOf(previous)}-`).device;
+      const created = this.createdLightsOf(previous).map((externalId) => externalId.slice(prefix.length));
+      const moved = created.filter((uniqueid) => uniqueids.has(uniqueid));
+      if (moved.length > 0 && moved.length * 2 >= created.length) {
+        return previous;
+      }
+    }
+    return undefined;
   }
 }

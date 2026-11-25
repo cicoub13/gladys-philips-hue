@@ -199,3 +199,26 @@ test("a bridge with an id paired at a forgotten id-less bridge's address keeps i
   assert.deepEqual(store.list(), [{ id: 'B', ip: '10.0.0.1', username: 'user-b2' }]);
   assert.deepEqual(store.forgotten, [{ ip: '10.0.0.1', platformKey: '10.0.0.1' }]);
 });
+
+test('a bridge replacing another one takes its place, stored or forgotten, and survives a restart', async () => {
+  const file = await tempFile();
+  const store = new BridgeStore(file);
+  await store.load();
+  await store.upsert({ id: 'old', ip: '192.168.1.10', username: 'user-1' });
+  await store.upsert({ id: 'gone', ip: '192.168.1.20', username: 'user-2' });
+  await store.remove([store.list()[1]]);
+
+  await store.replace(store.list()[0], { id: 'pro', ip: '192.168.1.30', username: 'user-1', platformKey: 'old' });
+  await store.replace(store.forgotten[0], { id: 'pro2', ip: '192.168.1.40', username: 'user-3', platformKey: 'gone' });
+
+  const reopened = new BridgeStore(file);
+  await reopened.load();
+  assert.deepEqual(
+    reopened.list().map((bridge) => [bridge.id, bridge.platformKey]),
+    [
+      ['pro', 'old'],
+      ['pro2', 'gone'],
+    ],
+  );
+  assert.deepEqual(reopened.forgotten, []);
+});

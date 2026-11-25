@@ -53,10 +53,25 @@ light, commandSeq }`, rebuilt by `buildDiscoveredDevices()`. `setValue` resolves
   username in its path) is written. `requestJson` exposes **non-enumerable** `fingerprint` and
   `commonName` on the body; a refused certificate sets `error.tlsRefused`. Has an overall deadline
   and a `close` handler (a mid-body disconnect used to hang forever).
-- Discovery order: mediated SSDP (`hue-bridgeid` header required) → mediated mDNS `_hue._tcp`
-  (TXT `bridgeid` or name matching /hue/) → N-UPnP cloud `https://discovery.meethue.com/`. Results
-  cached 10 s (`SCAN_CACHE_MS`) because the core allows one mediated scan per 10 s (else 429);
-  tests must call `resetDiscoveryCache()`.
+- Discovery: mediated mDNS `_hue._tcp` (TXT `bridgeid` or name matching /hue/) THEN mediated SSDP
+  (`hue-bridgeid` header required), both always, one after the other (the core runs one scan per
+  integration at a time), 3 s each, merged by bridge id (`mergeBridges`, mDNS wins); N-UPnP cloud
+  `https://discovery.meethue.com/` (5 s) only when both found nothing, and never with
+  `{ cloud: false }` (background search). LAN results cached 10 s (`SCAN_CACHE_MS`); tests must call
+  `resetDiscoveryCache()`. Scans + cloud + identification must fit the 20 s of the actions.
+- Moved bridge (§4.7 of #48): `followMovedBridges(identified)` (under `exclusive`) gives a stored
+  bridge with an id that is in `unreachable` the address identification found it at, same username.
+  Over HTTPS the found certificate must equal the pinned one (`keepsPin`: the bridge id is public).
+  Runs after every identification (`identifiedBridges`: Discover and Pair) and in `resync()`
+  (`searchMovedBridges`, LAN only, when a stored bridge with an id is in `unreachable`).
+- Pairing (`pairIdentified`, under `exclusive`): (1) a stored bridge whose username still works
+  (`keyWorks`, behind `keepsPin`) is stored again without `createUser` (no orphan user); (2) a new
+  HTTPS bridge accepting the username of a stored bridge in `unreachable` is a migration
+  (`keyOwnerOf`: a Bridge Pro migration keeps the app keys); (3) otherwise `createUser`, then
+  `previousOwnerOf`: a stored bridge in `unreachable`, or a forgotten one, at least half of whose
+  created lights (by `uniqueid` in the external_id) the new bridge holds. (2) and (3) go through
+  `replaceBridge` → `store.replace(previous, { ...credentials, platformKey: platformKeyOf(previous) })`:
+  the new bridge takes the old key, so the external_ids are kept; `result.replaced` feeds the message.
 - Polling only (no push/event stream). The bridge rate-limits ~10 req/s: the refresh loop and the
   scene refresh do one `getLights()` per bridge, not one call per light.
 
@@ -99,8 +114,8 @@ certFingerprint?, platformKey? }], forgotten?: [{ id?, ip, platformKey? }] }` (`
   cleared by `stop()`. Unknown device on command triggers a shared resync at most every 30 s.
 - Connection status is recomputed from `unreachable` and sent only when it changes.
 - Bridges are addressed by their stored `ip`, but tracked by `platformKeyOf(bridge)` (`unreachable`,
-  `silentSince`): two stored bridges may share an IP (a dead bridge and its replacement). Nothing
-  re-discovers a moved bridge automatically, re-pairing updates the ip (`upsert` keyed by id). A light
+  `silentSince`): two stored bridges may share an IP (a dead bridge and its replacement). A moved
+  bridge is followed (`followMovedBridges`, see above), re-pairing updates the ip too (`upsert` keyed by id). A light
   is attributed to its bridge by external_id (`ownerOf`: longest `platformKey || id || ip` + `-`
   prefix), not by `entry.bridgeIp`; `callBridge`/`markBridge` take the bridge object, and so do the
   scene candidates (`activateScene`).

@@ -70,23 +70,34 @@ la scène Gladys continue de s'exécuter.
 
 ### Remplacer un bridge
 
-Après avoir remplacé votre bridge ou migré vers un Hue Bridge Pro, appairez le
-nouveau (étapes ci-dessus), puis cliquez sur **Oublier les bridges
-injoignables** : l'intégration oublie tous les bridges appairés qui ne répondent
-plus, ou n'acceptent plus l'intégration, et cesse de les signaler injoignables.
-Un bridge qui fonctionne n'est jamais oublié, même s'il est occupé, pas plus
-qu'un bridge qui vient tout juste de cesser de répondre (il redémarre
-peut-être) : recliquez quand il ne répond plus depuis 5 minutes. Les lampes du nouveau bridge apparaissent comme de nouveaux appareils
-dans l'onglet **Découverte** ; supprimez les anciens depuis la page Appareils.
+Après avoir remplacé votre bridge ou migré vers un Hue Bridge Pro, cliquez sur
+**Appairer le bridge**. Après une migration, le nouveau bridge accepte en
+général déjà l'intégration : essayez d'abord sans appuyer sur son bouton, et si
+le message le demande, appuyez sur le bouton puis recliquez.
+
+L'intégration reconnaît le nouveau bridge comme le remplaçant de l'ancien quand
+l'ancien ne répond plus (ou a été oublié) et que le nouveau accepte son accès,
+ou porte au moins la moitié de ses lampes créées dans Gladys. Il prend alors la
+place de l'ancien : les lampes déjà créées continuent de fonctionner, avec leurs
+pièces, scènes et historique, et le message indique quel bridge il remplace.
+
+Sinon, les lampes du nouveau bridge apparaissent comme de nouveaux appareils
+dans l'onglet **Découverte**. Cliquez sur **Oublier les bridges injoignables** :
+l'intégration oublie tous les bridges appairés qui ne répondent plus, ou
+n'acceptent plus l'intégration, et cesse de les signaler injoignables. Un bridge
+qui fonctionne n'est jamais oublié, même s'il est occupé, pas plus qu'un bridge
+qui vient tout juste de cesser de répondre (il redémarre peut-être) : recliquez
+quand il ne répond plus depuis 5 minutes. Supprimez ensuite les anciens
+appareils depuis la page Appareils.
 
 ## Comment le bridge est trouvé
 
-Trois méthodes sont tentées, dans cet ordre, et la première qui trouve un bridge
-l'emporte :
-
-1. **SSDP** sur votre réseau local, effectué par Gladys pour le compte de
-   l'intégration ;
-2. **mDNS** (`_hue._tcp`), par le même mécanisme ;
+1. **mDNS** (`_hue._tcp`) sur votre réseau local, effectué par Gladys pour le
+   compte de l'intégration : la méthode recommandée par Philips, et la seule à
+   laquelle répond un Hue Bridge Pro ;
+2. **SSDP**, par le même mécanisme, pour les bridges dont le mDNS n'atteint pas
+   Gladys. Les bridges trouvés par les deux méthodes sont réunis : plusieurs
+   bridges (un bridge carré et un Bridge Pro, par exemple) sont tous trouvés ;
 3. le service **N-UPnP** de Philips (`discovery.meethue.com`) en dernier recours.
    Celui-ci est un service _cloud_ Philips : il nécessite un accès Internet et ne
    renvoie que les bridges vus depuis la même adresse IP publique. Il n'est
@@ -130,12 +141,14 @@ l'appairage manque. Appuyez sur le bouton rond du bridge, puis recliquez sur
 **Appairer le bridge** dans les 30 secondes qui suivent.
 
 **Les lampes ne répondent plus** : le bridge a peut-être changé d'adresse IP.
-**Découvrir les bridges** ne met pas à jour l'adresse d'un bridge déjà appairé :
-appuyez sur le bouton du bridge, puis recliquez sur **Appairer le bridge**. Vos
-lampes gardent leurs appareils dans Gladys. Fixez ensuite l'adresse du bridge
-dans votre box pour qu'elle ne change plus. Une exception : un bridge appairé
-avec la version 1.1.0 ou antérieure via **Adresse IP du bridge**, que
-l'intégration n'a pas joint depuis sa mise à jour, revient avec de nouveaux
+L'intégration le cherche sur votre réseau local en arrière-plan, et le suit à sa
+nouvelle adresse sans nouvel appairage ; **Découvrir les bridges** fait de même
+tout de suite. Si les lampes ne reviennent toujours pas, appuyez sur le bouton
+du bridge, puis recliquez sur **Appairer le bridge**. Vos lampes gardent leurs
+appareils dans Gladys. Fixez tout de même l'adresse du bridge dans votre box
+pour qu'elle ne change plus. Une exception : un bridge appairé avec la version
+1.1.0 ou antérieure via **Adresse IP du bridge**, que l'intégration n'a pas
+joint depuis sa mise à jour, n'est pas suivi et revient avec de nouveaux
 appareils.
 
 **Les lampes ne répondent plus après une mise à jour du bridge** : depuis le
