@@ -222,3 +222,22 @@ test('a bridge replacing another one takes its place, stored or forgotten, and s
   );
   assert.deepEqual(reopened.forgotten, []);
 });
+
+test('a replaced bridge paired again as a bridge of its own gets a key of its own', async () => {
+  // A BSB002 migrated to a Bridge Pro, reset, then paired again: under the key
+  // the Pro took, commands to its lights would reach the Pro.
+  const store = new BridgeStore(await tempFile());
+  await store.load();
+  await store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-1' });
+  await store.replace(store.list()[0], { id: 'pro', ip: '192.168.1.30', username: 'user-1', platformKey: 'b1' });
+  await store.upsert({ id: 'b1', ip: '192.168.1.10', username: 'user-2' });
+  await store.upsert({ id: 'b1', ip: '192.168.1.11', username: 'user-2' }); // the same bridge, moved
+
+  assert.deepEqual(
+    store.list().map((bridge) => [bridge.id, bridge.platformKey]),
+    [
+      ['pro', 'b1'],
+      ['b1', 'b1-2'],
+    ],
+  );
+});

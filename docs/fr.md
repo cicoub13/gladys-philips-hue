@@ -76,14 +76,12 @@ la scène Gladys continue de s'exécuter.
 
 ### Remplacer un bridge
 
-Après avoir remplacé votre bridge ou migré vers un Hue Bridge Pro, cliquez sur
-**Appairer le bridge**. Après une migration, le nouveau bridge accepte en
-général déjà l'intégration : essayez d'abord sans appuyer sur son bouton, et si
-le message le demande, appuyez sur le bouton puis recliquez.
+Après avoir remplacé votre bridge ou migré vers un Hue Bridge Pro, appairez le
+nouveau (étapes ci-dessus).
 
 L'intégration reconnaît le nouveau bridge comme le remplaçant de l'ancien quand
-l'ancien ne répond plus (ou a été oublié) et que le nouveau accepte son accès,
-ou porte au moins la moitié de ses lampes créées dans Gladys. Il prend alors la
+l'ancien ne fonctionne plus (ou a été oublié) et que le nouveau porte au moins
+la moitié de ses lampes créées dans Gladys. Il prend alors la
 place de l'ancien : les lampes déjà créées continuent de fonctionner, avec leurs
 pièces, scènes et historique, et le message indique quel bridge il remplace.
 

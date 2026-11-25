@@ -41,6 +41,11 @@ const SCAN_CACHE_MS = 10000;
 
 let scanCache = { at: -Infinity, bridges: [] };
 
+// The LAN scans in progress, shared: the core runs one scan per integration at a
+// time and refuses a second one, so a click on "Discover bridges" during a
+// background search waits for it and takes its result.
+let scanning;
+
 /**
  * Parse the raw text of an SSDP response (`HTTP/1.1 200 OK` then `Name: value`
  * lines, CRLF or LF) into its headers. Header names are case-insensitive, so
@@ -136,7 +141,8 @@ export function parseMdnsResults(services) {
  * @param {object} gladys - The GladysIntegration SDK instance.
  * @param {string} type - Scan type (`ssdp` or `mdns`).
  * @param {Function} parse - Parser turning the raw results into bridges.
- * @returns {Promise<Array<{ id: string, ip: string }>>} Discovered bridges.
+ * @returns {Promise<Array<{ id: string, ip: string }> | undefined>} Discovered bridges, `undefined` when the
+ * scan failed.
  */
 async function mediatedScan(gladys, type, parse) {
   if (!gladys || typeof gladys.scanNetwork !== 'function') {
@@ -149,8 +155,24 @@ async function mediatedScan(gladys, type, parse) {
     return bridges;
   } catch (error) {
     logger.warn(`${type.toUpperCase()} discovery failed: ${error.message}`);
-    return [];
+    return undefined;
   }
+}
+
+/**
+ * Scan the LAN: mDNS then SSDP, merged. The result is reused for a few
+ * seconds, unless a scan failed.
+ * @param {object} [gladys] - SDK instance.
+ * @returns {Promise<Array<{ id: string, ip: string }>>} Discovered bridges.
+ */
+async function scanLan(gladys) {
+  const mdns = await mediatedScan(gladys, 'mdns', parseMdnsResults);
+  const ssdp = await mediatedScan(gladys, 'ssdp', parseSsdpResults);
+  const bridges = mergeBridges([...(mdns || []), ...(ssdp || [])]);
+  if (mdns && ssdp) {
+    scanCache = { at: performance.now(), bridges };
+  }
+  return bridges;
 }
 
 /**
@@ -217,10 +239,12 @@ export async function discoverBridges(gladys, { cloud = true } = {}) {
     logger.debug('Reusing the bridges discovered a few seconds ago');
     bridges = scanCache.bridges;
   } else {
-    const mdns = await mediatedScan(gladys, 'mdns', parseMdnsResults);
-    const ssdp = await mediatedScan(gladys, 'ssdp', parseSsdpResults);
-    bridges = mergeBridges([...mdns, ...ssdp]);
-    scanCache = { at: performance.now(), bridges };
+    if (!scanning) {
+      scanning = scanLan(gladys).finally(() => {
+        scanning = undefined;
+      });
+    }
+    bridges = await scanning;
   }
   if (bridges.length === 0 && cloud) {
     return discoverViaNupnp();
@@ -234,4 +258,5 @@ export async function discoverBridges(gladys, { cloud = true } = {}) {
  */
 export function resetDiscoveryCache() {
   scanCache = { at: -Infinity, bridges: [] };
+  scanning = undefined;
 }

@@ -266,3 +266,29 @@ test('an unexpected N-UPnP body shape is swallowed', async () => {
   mock.method(global, 'fetch', async () => ({ ok: true, status: 200, json: async () => ({ error: 'nope' }) }));
   assert.deepEqual(await discoverBridges(createFakeGladys()), []);
 });
+
+test('a discovery started during another one waits for it and takes its result', async () => {
+  // The core runs one scan per integration at a time: a click on "Discover
+  // bridges" during a background search used to get two refusals and nothing.
+  const gladys = createFakeGladys({ scanResults: { mdns: [HUE_MDNS_SERVICE] } });
+  const [background, clicked] = await Promise.all([discoverBridges(gladys, { cloud: false }), discoverBridges(gladys)]);
+  assert.deepEqual(background, [HUE_BRIDGE]);
+  assert.deepEqual(clicked, [HUE_BRIDGE]);
+  assert.deepEqual(scanTypes(gladys), ['mdns', 'ssdp']);
+});
+
+test('a failed scan is not reused: the next discovery scans again', async (t) => {
+  mock.method(global, 'fetch', async () => ({ ok: true, status: 200, json: async () => [] }));
+  const gladys = createFakeGladys({ scanResults: { mdns: [HUE_MDNS_SERVICE] } });
+  const scanNetwork = gladys.scanNetwork.bind(gladys);
+  let refused = true;
+  t.mock.method(gladys, 'scanNetwork', async (type, options) => {
+    if (refused) {
+      throw new Error('409 a scan is already running');
+    }
+    return scanNetwork(type, options);
+  });
+  assert.deepEqual(await discoverBridges(gladys), []);
+  refused = false;
+  assert.deepEqual(await discoverBridges(gladys), [HUE_BRIDGE]);
+});

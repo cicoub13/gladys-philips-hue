@@ -75,7 +75,25 @@ test('a dropped stream is opened again, later each time it fails', async (t) => 
   t.mock.timers.tick(2000); // second retry: succeeds
   await settle();
   assert.equal(fake.connections.length, 2);
-  assert.equal(stream.attempts, 0, 'the backoff starts over once connected');
+  stream.stop();
+});
+
+test('a stream the bridge closes right after opening it is reopened later each time', async (t) => {
+  // Only a connection that lasted starts the backoff over: each reopening
+  // costs three requests and a read of every light.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const fake = fakeBridge();
+  const stream = new EventStream({ name: 'test', open: fake.open, onEvents: () => {} });
+  stream.start();
+  for (const delay of [1000, 2000, 4000]) {
+    await settle();
+    fake.connections.at(-1).response.destroy();
+    await settle();
+    t.mock.timers.tick(delay);
+  }
+  await settle();
+  assert.equal(fake.connections.length, 4);
+  assert.equal(stream.attempts, 3);
   stream.stop();
 });
 

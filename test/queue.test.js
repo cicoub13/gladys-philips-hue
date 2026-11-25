@@ -70,3 +70,15 @@ test('a failed request frees its slot and reaches its caller only', async () => 
   await settle();
   assert.equal(queue.inFlight, 0);
 });
+
+test('a request that waited too long for its turn is dropped, not sent late', async () => {
+  const queue = new RequestQueue({ maxInFlight: 1, spacingMs: 0 });
+  const log = [];
+  const hung = deferred(log, 'hung');
+  queue.run(hung.task);
+  const late = queue.run(deferred(log, 'late').task, { maxWaitMs: 50 });
+  await new Promise((resolve) => setTimeout(resolve, 60)); // the bridge does not answer for a while
+  hung.finish();
+  await assert.rejects(late, (error) => error.queueTimeout === true);
+  assert.deepEqual(log, ['hung']);
+});

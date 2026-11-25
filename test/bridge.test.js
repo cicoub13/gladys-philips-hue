@@ -414,7 +414,7 @@ test('a client without an upgrade hook never switches (identification)', async (
 });
 
 test('isV2 tells a v2 bridge (403 without a key) from an older one', async () => {
-  const answers = { '192.168.1.10': 403, '192.168.1.11': 404 };
+  const answers = { '192.168.1.10': 403, '192.168.1.11': 404, '192.168.1.13': 503 };
   stubHttps((url) => {
     const status = answers[new URL(url).hostname];
     return status ? { status, body: {}, cn: BRIDGE_ID } : undefined;
@@ -424,6 +424,8 @@ test('isV2 tells a v2 bridge (403 without a key) from an older one', async () =>
   assert.equal(await client('192.168.1.11').isV2(), false);
   // Nothing answers: the next attempt will tell, not a definitive "no".
   await assert.rejects(() => client('192.168.1.12').isV2(), /ECONNREFUSED/);
+  // Busy, rebooting after a firmware update: neither.
+  await assert.rejects(() => client('192.168.1.13').isV2(), /HTTP 503/);
   // v2 only exists over HTTPS.
   assert.equal(await new HueBridgeClient('192.168.1.10', USERNAME).isV2(), false);
 });

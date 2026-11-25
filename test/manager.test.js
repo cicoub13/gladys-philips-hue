@@ -41,14 +41,17 @@ function makeFakeClient() {
       Object.assign(light.state, state);
       return [{ success: true }];
     },
-    // A round bridge: no HTTPS, so no v2 event stream (see withPush).
-    async switchToHttps() {
-      throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+    // A firmware without the v2 API: no event stream (see withPush).
+    async switchToHttps() {},
+    async isV2() {
+      return false;
     },
   };
 }
 
 async function makeManager() {
+  // A discovery cached by an earlier test would send real requests.
+  resetDiscoveryCache();
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'hue-mgr-'));
   const store = new BridgeStore(path.join(dir, 'bridges.json'));
   await store.load();
@@ -578,6 +581,17 @@ test('a paired bridge found at a new address is followed there, with the same us
   manager.stop();
 });
 
+test('a bridge whose old address now answers 404 (another device) is followed too', async () => {
+  const { manager, gladys, store, client } = await makeManager();
+  await createAll(manager, gladys);
+  failReads(client, { message: 'HTTP 404', httpStatus: 404 });
+  await manager.pollLights();
+  assert.ok(manager.resyncTimer, 'the background search runs');
+  await manager.followMovedBridges([{ id: 'b1', ip: '192.168.1.11', scheme: 'http' }]);
+  assert.equal(store.list()[0].ip, '192.168.1.11');
+  manager.stop();
+});
+
 test('a bridge that answers at its address is not moved', async () => {
   const { manager, store } = await makeManager();
   await manager.syncDevices();
@@ -639,10 +653,13 @@ test('pairing a bridge again reuses its username when it still works: no link bu
   mock.restoreAll();
 });
 
-test('a bridge migrated to a Bridge Pro is paired without the link button, and keeps the devices', async () => {
-  // The migration moves the keys of the apps to the Bridge Pro, under a new
-  // bridge id: until now every light came back as a new device.
-  const { manager, gladys, store, client } = await makeLostBridgeManager();
+test('a bridge migrated to a Bridge Pro keeps the devices, even when the old one still answers', async () => {
+  // After the migration the old bridge is reset, but may stay plugged in and
+  // answer "unauthorized user". Until now every light came back as a new device.
+  const { manager, gladys, store, client } = await makeManager();
+  await createAll(manager, gladys);
+  failReads(client, { message: 'unauthorized user', hueErrorType: 1 });
+  await manager.pollLights();
   const pro = {
     ...IDENTIFIED_BRIDGE,
     ip: '192.168.1.50',
@@ -652,8 +669,11 @@ test('a bridge migrated to a Bridge Pro is paired without the link button, and k
     certFingerprint: fingerprintOf(Buffer.from('cert')),
   };
   manager.identifiedBridges = async () => ({ bridges: [pro], ignored: [] });
-  const { calls } = stubHttps((url) => ({
-    body: url.endsWith('/api/user-1/lights') ? { 7: { name: 'Salon', uniqueid: '00:17:88:01:aa' } } : UNAUTHORIZED,
+  const { calls } = stubHttps((url, options) => ({
+    body:
+      options.method === 'POST'
+        ? [{ success: { username: 'pro-key' } }]
+        : { 7: { name: 'Salon', uniqueid: '00:17:88:01:aa' } },
     cn: pro.id,
   }));
 
@@ -662,17 +682,17 @@ test('a bridge migrated to a Bridge Pro is paired without the link button, and k
     result.replaced.map(({ bridge, previous }) => [bridge.id, previous.id]),
     [['c42996fffe0a1b2c', 'b1']],
   );
-  assert.ok(
-    calls.every((call) => call.method !== 'POST'),
-    'no new user',
+  assert.deepEqual(
+    calls.map((call) => `${call.method} ${call.url}`),
+    ['POST https://192.168.1.50/api', 'GET https://192.168.1.50/api/pro-key/lights'],
+    'the old username is never sent to the new bridge',
   );
   assert.deepEqual(
     store.list().map((bridge) => [bridge.id, bridge.ip, bridge.username, bridge.platformKey]),
-    [['c42996fffe0a1b2c', '192.168.1.50', 'user-1', 'b1']],
+    [['c42996fffe0a1b2c', '192.168.1.50', 'pro-key', 'b1']],
   );
 
   // Its lights come back under the same external_ids, whatever their new Hue ids.
-  client.down = false;
   client.getLights = async () => ({ 7: client.light });
   await manager.syncDevices();
   assert.deepEqual([...manager.registry.keys()], [SALON_ID]);
@@ -682,30 +702,26 @@ test('a bridge migrated to a Bridge Pro is paired without the link button, and k
   mock.restoreAll();
 });
 
-test('a username is never tried on a bridge over plain HTTP, nor taken from a bridge that answers', async () => {
-  const notPressed = [{ error: { type: 101, description: 'link button not pressed' } }];
-  const { manager } = await makeManager();
-  await manager.syncDevices(); // b1 answers
-  const { calls } = stubHttps(() => ({ body: notPressed, cn: 'other' }));
+test('the username of a paired bridge is never sent to a new bridge', async () => {
+  // The id a new bridge announces, and the certificate naming it, prove nothing.
+  const { manager } = await makeLostBridgeManager();
+  const { calls } = stubHttps(() => ({
+    body: [{ error: { type: 101, description: 'link button not pressed' } }],
+    cn: 'other',
+  }));
   manager.identifiedBridges = async () => ({
     bridges: [
       { ...IDENTIFIED_BRIDGE, id: 'other', scheme: 'https', certFingerprint: fingerprintOf(Buffer.from('cert')) },
     ],
     ignored: [],
   });
-  await manager.pairBridges();
+  const result = await manager.pairBridges();
+  assert.equal(result.pending.length, 1);
   assert.deepEqual(
     calls.map((call) => `${call.method} ${call.url}`),
     ['POST https://192.168.1.42/api'],
   );
-  mock.restoreAll();
-
-  const lost = await makeLostBridgeManager();
-  const httpCalls = serveHttp(() => notPressed);
-  lost.manager.identifiedBridges = async () => ({ bridges: [{ ...IDENTIFIED_BRIDGE, id: 'other' }], ignored: [] });
-  await lost.manager.pairBridges();
-  assert.deepEqual(httpCalls, ['POST http://192.168.1.42/api']);
-  lost.manager.stop();
+  manager.stop();
   mock.restoreAll();
 });
 
@@ -1087,14 +1103,13 @@ test('the stream catches up on what changed while it was closed', async (t) => {
   manager.stop();
 });
 
-test('a bridge without the v2 API is polled only, and never asked again', async (t) => {
-  const { manager, gladys, client } = await makeManager();
+test('a bridge without the v2 API is polled only, and asked again only once it moved', async (t) => {
+  const { manager, gladys, store, client } = await makeManager();
   await createAll(manager, gladys);
   let asked = 0;
-  const switchToHttps = client.switchToHttps;
-  client.switchToHttps = () => {
+  client.isV2 = async () => {
     asked += 1;
-    return switchToHttps();
+    return false;
   };
   t.mock.timers.enable({ apis: ['setTimeout'] });
   manager.startPolling();
@@ -1104,6 +1119,30 @@ test('a bridge without the v2 API is polled only, and never asked again', async 
   await flush();
   assert.equal(asked, 1);
   assert.equal(manager.streams.size, 0);
+
+  // Found at another address: what answered at the old one says nothing of it.
+  store.list()[0].ip = '192.168.1.11';
+  await manager.syncDevices();
+  await flush();
+  assert.equal(asked, 2);
+  manager.stop();
+});
+
+test('a round bridge, which refuses HTTPS, is asked again later: a booting bridge refuses it too', async (t) => {
+  const { manager, gladys, client } = await makeManager();
+  await createAll(manager, gladys);
+  let asked = 0;
+  client.switchToHttps = async () => {
+    asked += 1;
+    throw Object.assign(new Error('connect ECONNREFUSED 192.168.1.10:443'), { code: 'ECONNREFUSED' });
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  manager.startPolling();
+  await flush();
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(asked, 2);
+  assert.equal(manager.streams.size, 1, 'still trying');
   manager.stop();
 });
 
@@ -1128,6 +1167,11 @@ test('a refresh that cannot reach the bridge opens its stream again', async (t) 
   client.down = true;
   await manager.pollLights();
   assert.equal(client.streams[0].response.destroyed, true);
+  client.down = false;
+  await flush();
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(client.streams.length, 2);
   manager.stop();
 });
 

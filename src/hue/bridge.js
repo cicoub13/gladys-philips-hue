@@ -46,6 +46,11 @@ const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 // failing, within the 5 s Gladys gives a command.
 const BUSY_RETRY_DELAYS_MS = [250, 500, 1000];
 
+// How long a request may wait for its turn in the bridge's queue (see
+// ./queue.js): a command, less than the 5 s Gladys waits for it.
+const MAX_QUEUE_WAIT_MS = 20000;
+const COMMAND_MAX_QUEUE_WAIT_MS = 4000;
+
 // Hue error type returned while the physical link button has NOT been pressed.
 export const HUE_LINK_BUTTON_NOT_PRESSED = 101;
 
@@ -297,18 +302,19 @@ export class HueBridgeClient {
    * surface the Hue errors hidden in HTTP 200 bodies as thrown errors.
    * @param {string} path - Path appended to `http://<ip>`.
    * @param {object} [options] - Fetch options, plus `retries`: retries of a request that got no answer (default
-   * 1). `0` also disables the retries of a busy answer (429/5xx).
+   * 1). `0` also disables the retries of a busy answer (429/5xx). `maxWaitMs`: how long it may wait in the
+   * bridge's queue (20 s by default); beyond, it fails with `queueTimeout` set, never retried.
    * @returns {Promise<any>} Parsed JSON response, guaranteed error-free.
    * @throws {Error} With `.hueErrorType` set for a Hue business error.
    */
   async request(path, options = {}) {
-    const { retries = DEFAULT_RETRIES, ...fetchOptions } = options;
+    const { retries = DEFAULT_RETRIES, maxWaitMs = MAX_QUEUE_WAIT_MS, ...fetchOptions } = options;
     let silentRetries = 0;
     let busyRetries = 0;
 
     for (;;) {
       try {
-        const body = await this.queue.run(() => this.fetchOnce(path, fetchOptions));
+        const body = await this.queue.run(() => this.fetchOnce(path, fetchOptions), { maxWaitMs });
         const hueError = findHueError(body);
         if (hueError) {
           // A business error: the bridge understood us and said no. Retrying
@@ -322,7 +328,10 @@ export class HueBridgeClient {
         return body;
       } catch (error) {
         let delay;
-        if (error.hueErrorType !== undefined) {
+        if (error.queueTimeout) {
+          error.message = `Bridge ${this.ip} is busy: ${this.redact(path)} ${error.message}`;
+          throw error;
+        } else if (error.hueErrorType !== undefined) {
           throw error;
         } else if (error.httpStatus === undefined && silentRetries < retries) {
           silentRetries += 1;
@@ -393,6 +402,7 @@ export class HueBridgeClient {
     return this.request(`/api/${this.username}/lights/${id}/state`, {
       method: 'PUT',
       body: JSON.stringify(state),
+      maxWaitMs: COMMAND_MAX_QUEUE_WAIT_MS,
     });
   }
 
@@ -449,7 +459,7 @@ export class HueBridgeClient {
    * without a key (403), like aiohue's `is_v2_bridge` checks. The round bridge,
    * and square bridges older than firmware 1.48, answer 404. HTTPS only.
    * @returns {Promise<boolean>} True for a v2 bridge.
-   * @throws {Error} When the bridge did not answer at all.
+   * @throws {Error} When the bridge did not answer, or was busy (429/5xx): the next attempt will tell.
    */
   async isV2() {
     if (this.scheme !== 'https') {
@@ -459,7 +469,7 @@ export class HueBridgeClient {
       await this.queue.run(() => this.fetchWith('/clip/v2/resource', {}));
       return false;
     } catch (error) {
-      if (error.httpStatus === undefined) {
+      if (error.httpStatus === undefined || RETRYABLE_STATUS.has(error.httpStatus)) {
         throw error;
       }
       return error.httpStatus === 403;

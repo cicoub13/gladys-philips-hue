@@ -33,6 +33,15 @@ function forgottenMatches(forgotten, bridge) {
 }
 
 /**
+ * The bridge part of the external_ids of a bridge's lights (see `platformKeyOf` in the manager).
+ * @param {{ id?: string, ip: string, platformKey?: string }} bridge - Stored or forgotten bridge.
+ * @returns {string} Key.
+ */
+function keyOf(bridge) {
+  return bridge.platformKey || bridge.id || bridge.ip;
+}
+
+/**
  * Simple JSON-file store for the list of paired bridges, with an in-memory cache.
  */
 export class BridgeStore {
@@ -157,13 +166,13 @@ export class BridgeStore {
       const forgotten =
         (bridge.id && this.forgotten.find((entry) => entry.id === bridge.id)) ||
         this.forgotten.find((entry) => !entry.id && entry.ip === bridge.ip);
+      let entry = bridge;
       if (forgotten) {
         // Forgotten, then paired again: its lights keep their external_ids.
-        this.forgotten = this.forgotten.filter((entry) => entry !== forgotten);
-        this.bridges.push({ ...bridge, ...(forgotten.platformKey ? { platformKey: forgotten.platformKey } : {}) });
-      } else {
-        this.bridges.push(bridge);
+        this.forgotten = this.forgotten.filter((known) => known !== forgotten);
+        entry = { ...bridge, ...(forgotten.platformKey ? { platformKey: forgotten.platformKey } : {}) };
       }
+      this.bridges.push(this.withFreeKey(entry));
     }
     try {
       await this.persist();
@@ -218,6 +227,27 @@ export class BridgeStore {
    * @param {object} bridge - The new bridge, with its credentials and `platformKey`.
    * @returns {Promise<void>} Resolves once stored (persisted or in memory only).
    */
+  /**
+   * Give a new entry a key of its own when another stored bridge has its key
+   * already: a bridge replaced by another one (which took its key) and then
+   * paired again as a bridge of its own. Two bridges with one key would share
+   * their lights' external_ids, and commands would reach the wrong bridge.
+   * @param {object} entry - New entry.
+   * @returns {object} The entry, with a free `platformKey` when needed.
+   */
+  withFreeKey(entry) {
+    const taken = new Set(this.bridges.map(keyOf));
+    const key = keyOf(entry);
+    if (!taken.has(key)) {
+      return entry;
+    }
+    let suffix = 2;
+    while (taken.has(`${key}-${suffix}`)) {
+      suffix += 1;
+    }
+    return { ...entry, platformKey: `${key}-${suffix}` };
+  }
+
   async replace(previous, bridge) {
     this.bridges = [...this.bridges.filter((known) => known !== previous), bridge];
     this.forgotten = this.forgotten.filter((known) => known !== previous);

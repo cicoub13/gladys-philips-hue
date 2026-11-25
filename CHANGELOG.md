@@ -18,7 +18,6 @@ All notable changes to the Philips Hue integration for Gladys Assistant.
 - After a migration to a Hue Bridge Pro, or a bridge replacement, **Pair bridge**
   recognizes the new bridge: the lights already created in Gladys keep working,
   with their rooms, scenes and history, instead of coming back as new devices.
-  After a migration, no link-button press is needed.
 - **Pair bridge** on a bridge already paired reuses its access, without the link
   button, instead of creating another user on the bridge.
 

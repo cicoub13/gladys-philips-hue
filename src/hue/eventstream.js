@@ -22,6 +22,10 @@ const logger = createLogger({ name: 'hue-eventstream' });
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 60 * 1000;
 
+// A connection that lasted this long starts the backoff over when it drops: one
+// that a peer closes right after opening it must not be reopened every second.
+const STABLE_MS = 30 * 1000;
+
 // A message is a few KB; this only guards against a peer that never ends one.
 const MAX_PENDING_CHARS = 1024 * 1024;
 
@@ -142,7 +146,6 @@ export class EventStream {
       opened.close();
       return;
     }
-    this.attempts = 0;
     this.listen(opened);
     logger.info(`Event stream from ${this.name} open: changes made outside Gladys show up at once`);
     this.onOpen();
@@ -153,6 +156,7 @@ export class EventStream {
    * @param {{ response: import('node:stream').Readable, close: () => void }} opened - Open connection.
    */
   listen({ response, close }) {
+    const openedAt = performance.now();
     let pending = '';
     let closed = false;
     const done = (error) => {
@@ -162,6 +166,9 @@ export class EventStream {
       closed = true;
       if (this.close === close) {
         this.close = undefined;
+      }
+      if (performance.now() - openedAt >= STABLE_MS) {
+        this.attempts = 0;
       }
       this.retry(error || new Error('the bridge closed the stream'));
     };

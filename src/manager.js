@@ -59,6 +59,10 @@ const REFRESH_COALESCE_MS = 1000;
 // few hundred ms per light, and Gladys takes 300 states per minute.
 const EVENT_THROTTLE_MS = 1000;
 
+// A bridge that fails is looked for at another address at most this often: the
+// LAN scans take 6 s, and the core runs one at a time for the integration.
+const MOVE_SEARCH_INTERVAL_MS = 60 * 1000;
+
 // A light missing from the registry triggers a full resync, at most this often
 // (a device deleted on the bridge side would otherwise resync on every command).
 const REFRESH_MIN_INTERVAL_MS = 30000;
@@ -192,6 +196,7 @@ export class HueManager {
     this.resyncAttempts = 0;
     this.refreshing = undefined;
     this.lastRefreshAt = -Infinity;
+    this.lastMoveSearchAt = -Infinity;
     this.stopped = false;
     // The light state refresh loop (startPolling / stopPolling).
     this.polling = false;
@@ -214,8 +219,11 @@ export class HueManager {
     this.pendingRefreshes = new Map();
     /** @type {Map<object, { stream: EventStream, ip: string }>} The v2 event stream of each stored bridge. */
     this.streams = new Map();
-    /** @type {WeakSet<object>} Bridges without the v2 API (round bridge, old firmware): polled only. */
-    this.withoutPush = new WeakSet();
+    /**
+     * @type {WeakMap<object, string>} Bridges found without the v2 API (old firmware), or with something else
+     * than the bridge answering on HTTPS, with the address where it was found: polled only, until they move.
+     */
+    this.withoutPush = new WeakMap();
     /** @type {Map<object, Map<string, object>>} Pushed changes waiting to be published, by bridge. */
     this.pendingPatches = new Map();
     /** @type {Map<object, NodeJS.Timeout>} Throttle of the pushed changes, by bridge (see `queuePatches`). */
@@ -556,10 +564,11 @@ export class HueManager {
    * and the resync loop accordingly. Never throws: the caller's own outcome is
    * what Gladys must see.
    * @param {object} bridge - Stored bridge.
-   * @param {boolean} reachable - Whether it answered.
+   * @param {boolean} reachable - Whether it works.
+   * @param {boolean} [answered] - Whether it answered at all, even to refuse (see `silentSince`).
    * @returns {Promise<void>} Resolves once reported.
    */
-  async markBridge(bridge, reachable) {
+  async markBridge(bridge, reachable, answered = reachable) {
     if (!this.store.list().includes(bridge)) {
       // Forgotten while this call was in flight: nothing to record.
       return;
@@ -569,7 +578,7 @@ export class HueManager {
     } else {
       this.unreachable.add(platformKeyOf(bridge));
     }
-    this.recordSilence(bridge, reachable);
+    this.recordSilence(bridge, answered);
     this.scheduleResync();
     const pushed = this.streams.get(bridge);
     if (!reachable && pushed) {
@@ -584,7 +593,10 @@ export class HueManager {
   }
 
   /**
-   * Run one call to a bridge, recording whether it answered.
+   * Run one call to a bridge, recording whether it answered. An answer proving
+   * the bridge gone (reset, or something else at its address) makes it
+   * unreachable too, like a scan does: a moved or replaced bridge is only looked
+   * for among those. A refused command (a light switched off, say) does not.
    * @param {object} bridge - Stored bridge.
    * @param {() => Promise<any>} operation - The call.
    * @returns {Promise<any>} The call's result.
@@ -595,7 +607,7 @@ export class HueManager {
       await this.markBridge(bridge, true);
       return result;
     } catch (error) {
-      await this.markBridge(bridge, !isUnreachable(error));
+      await this.markBridge(bridge, !isUnreachable(error) && !isGone(error), !isUnreachable(error));
       throw error;
     }
   }
@@ -640,13 +652,18 @@ export class HueManager {
 
   /**
    * Look for the paired bridges that fail at their address, in case they only
-   * changed it (a new DHCP lease): LAN discovery only, never the cloud.
+   * changed it (a new DHCP lease): LAN discovery only, never the cloud, and at
+   * most once a minute.
    * @returns {Promise<void>} Resolves once done; never rejects.
    */
   async searchMovedBridges() {
     if (!this.store.list().some((bridge) => bridge.id && this.unreachable.has(platformKeyOf(bridge)))) {
       return;
     }
+    if (performance.now() - this.lastMoveSearchAt < MOVE_SEARCH_INTERVAL_MS) {
+      return;
+    }
+    this.lastMoveSearchAt = performance.now();
     try {
       const { bridges } = await identifyBridges(await discoverBridges(this.gladys, { cloud: false }));
       await this.exclusive(() => this.followMovedBridges(bridges));
@@ -731,7 +748,7 @@ export class HueManager {
       return;
     }
     for (const bridge of this.store.list()) {
-      if (!this.streams.has(bridge) && !this.withoutPush.has(bridge) && bridge.username) {
+      if (!this.streams.has(bridge) && this.withoutPush.get(bridge) !== bridge.ip && bridge.username) {
         this.startStream(bridge);
       }
     }
@@ -754,7 +771,7 @@ export class HueManager {
       // Catch up with what changed while it was closed.
       onOpen: () => this.refreshSoon(bridge, this.createdHueIdsOf(bridge)),
       onGiveUp: () => {
-        this.withoutPush.add(bridge);
+        this.withoutPush.set(bridge, bridge.ip);
         if (this.streams.get(bridge) && this.streams.get(bridge).stream === stream) {
           this.streams.delete(bridge);
         }
@@ -770,15 +787,16 @@ export class HueManager {
    * @param {object} bridge - Stored bridge.
    * @returns {Promise<{ response: object, close: () => void, index: object }>} The open stream, and the index
    * of the resources its events name.
-   * @throws {Error} With `permanent` set when the bridge has no event stream (round bridge, old firmware).
+   * @throws {Error} With `permanent` set when the bridge has no event stream (old firmware), or something else
+   * answers on HTTPS. A round bridge, which has no HTTPS at all, refuses the connection: that is retried, at most
+   * once a minute, since a booting bridge refuses it too.
    */
   async openEventStream(bridge) {
     const client = this.clientFor(bridge);
     try {
       await client.switchToHttps();
     } catch (error) {
-      // No HTTPS at all, or something else than the bridge answers there.
-      error.permanent = error.code === 'ECONNREFUSED' || Boolean(error.tlsRefused || error.wrongBridge);
+      error.permanent = Boolean(error.tlsRefused || error.wrongBridge);
       throw error;
     }
     if (!(await client.isV2())) {
@@ -1457,8 +1475,11 @@ export class HueManager {
 
   /**
    * The store part of `pairBridges`, run under the bridge lock. A bridge whose
-   * stored username still works, or that took over the username of a paired
-   * bridge (a migration keeps the keys of the apps), needs no link button.
+   * stored username still works needs no link button. The username of another
+   * bridge is never tried on a new one, although a migration to a Bridge Pro
+   * moves the keys of the apps: nothing but the id it announces proves who the
+   * new bridge is, and anything on the network can claim one. It is recognized
+   * by its lights instead, once paired (see `previousOwnerOf`).
    * @param {Array<object>} bridges - Identified bridges.
    * @param {{ paired: object[], pending: object[], unreachable: object[], replaced: object[] }} result - Filled
    * in place.
@@ -1474,11 +1495,6 @@ export class HueManager {
         // Paired already: no new user, which would be left orphan on the bridge.
         await this.store.upsert(credentialsOf(bridge, stored.username));
         result.paired.push(bridge);
-        continue;
-      }
-      const owner = stored ? undefined : await this.keyOwnerOf(bridge);
-      if (owner) {
-        await this.replaceBridge(bridge, owner, credentialsOf(bridge, owner.username), result);
         continue;
       }
       await this.pairWithButton(bridge, Boolean(stored), result);
@@ -1557,28 +1573,6 @@ export class HueManager {
       logger.debug(`A stored username does not work on bridge ${found.ip}: ${error.message}`);
       return false;
     }
-  }
-
-  /**
-   * The paired bridge whose username a new bridge accepts: migrating a bridge
-   * to a Bridge Pro moves the keys of the apps along. Only the bridges that fail
-   * are tried, and only over HTTPS (the bridges a migration targets), so that no
-   * username goes in clear, nor to a bridge that has nothing to do with it.
-   * @param {object} found - Identified bridge, not stored.
-   * @returns {Promise<object | undefined>} The stored bridge it replaces, if any.
-   */
-  async keyOwnerOf(found) {
-    if (found.scheme !== 'https') {
-      return undefined;
-    }
-    for (const previous of this.store.list()) {
-      if (previous.id !== found.id && this.unreachable.has(platformKeyOf(previous))) {
-        if (await this.keyWorks(found, previous.username)) {
-          return previous;
-        }
-      }
-    }
-    return undefined;
   }
 
   /**

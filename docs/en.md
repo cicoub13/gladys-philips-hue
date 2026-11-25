@@ -73,14 +73,12 @@ running.
 
 ### Replacing a bridge
 
-After replacing your bridge or migrating to a Hue Bridge Pro, click **Pair
-bridge**. After a migration, the new bridge usually accepts the integration
-already: try without pressing its button first, and if the message asks for
-it, press the button and click again.
+After replacing your bridge or migrating to a Hue Bridge Pro, pair the new one
+(steps above).
 
 The integration recognizes the new bridge as the replacement of the old one when
-the old one no longer answers (or was forgotten) and the new one either accepts
-its access, or holds at least half of its lights created in Gladys. It then
+the old one no longer works (or was forgotten) and the new one holds at least
+half of its lights created in Gladys. It then
 takes the old bridge's place: the lights already created keep working, with
 their rooms, scenes and history, and the message says which bridge it replaces.
 
